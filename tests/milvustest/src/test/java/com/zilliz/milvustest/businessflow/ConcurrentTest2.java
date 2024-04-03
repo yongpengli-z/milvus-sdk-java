@@ -91,7 +91,7 @@ public class ConcurrentTest2 {
         R<RpcStatus> credential = milvusClient.createCredential(CreateCredentialParam.newBuilder().withUsername(username).withPassword(password).build());
         log.info(String.valueOf(credential.getStatus()));
         log.info(credential.getData().toString());
-        milvusClient.close();
+        // milvusClient.close();
 
     }
 
@@ -112,7 +112,7 @@ public class ConcurrentTest2 {
                                 .withRoleName("admin")
                                 .build());
         Assert.assertEquals(rpcStatusR.getStatus().intValue(), 0);
-        milvusClient.close();
+        // milvusClient.close();
     }
 
     @Test(dependsOnMethods = "addUserToRole")
@@ -224,7 +224,7 @@ public class ConcurrentTest2 {
         for (Future future : list) {
             System.out.println("运行结果:"+future.get().toString());
         }
-        executorService.shutdown();
+        // executorService.shutdown();
 
     }
 
