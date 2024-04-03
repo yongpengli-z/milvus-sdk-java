@@ -91,7 +91,7 @@ public class ConcurrentTest2 {
         R<RpcStatus> credential = milvusClient.createCredential(CreateCredentialParam.newBuilder().withUsername(username).withPassword(password).build());
         log.info(String.valueOf(credential.getStatus()));
         log.info(credential.getData().toString());
-        // milvusClient.close();
+//        milvusClient.close();
 
     }
 
@@ -112,7 +112,7 @@ public class ConcurrentTest2 {
                                 .withRoleName("admin")
                                 .build());
         Assert.assertEquals(rpcStatusR.getStatus().intValue(), 0);
-        // milvusClient.close();
+//        milvusClient.close();
     }
 
     @Test(dependsOnMethods = "addUserToRole")
@@ -120,6 +120,7 @@ public class ConcurrentTest2 {
         int threads = THREAD;
         LocalDateTime endTime = LocalDateTime.now().plusHours(runTime);
         ArrayList<Future> list = new ArrayList<>();
+        List<InsertParam.Field> fields = CommonFunction.generateData(dataNum);
         ExecutorService executorService = Executors.newFixedThreadPool(threads);
         for (int e = 0; e < threads; e++) {
             int finalE = e;
@@ -162,12 +163,6 @@ public class ConcurrentTest2 {
                     R<RpcStatus> collection = milvusClient.createCollection(createCollectionReq);
                     System.out.println("线程" + finalE + ":用户Username" + finalE + "创建collection：" + collectionName);
                     System.out.println("线程" + finalE + ":用户Username" + finalE + "state：" + collection.getStatus());
-                    try {
-                        Thread.sleep(1000l);
-                    } catch (InterruptedException ex) {
-                        System.out.println("exception:"+ex.getMessage());
-                    }
-                    List<InsertParam.Field> fields = CommonFunction.generateData(dataNum);
                     R<MutationResult> insert = milvusClient.insert(InsertParam.newBuilder().withCollectionName(collectionName).withFields(fields).build());
                     System.out.println("线程" + finalE + ":用户Username" + finalE + "insert data：" + insert.getStatus());
                     R<RpcStatus> rpcStatusR =
@@ -224,107 +219,12 @@ public class ConcurrentTest2 {
         for (Future future : list) {
             System.out.println("运行结果:"+future.get().toString());
         }
-        // executorService.shutdown();
+//        executorService.shutdown();
 
     }
 
 
 //    @Test()
-    public void createCollection1() {
-        int threads = THREAD;
-        LocalDateTime endTime = LocalDateTime.now().plusHours(runTime);
-        ExecutorService executorService = Executors.newFixedThreadPool(threads);
-        int finalE=0;
-                MilvusServiceClient milvusClient =
-                        new MilvusServiceClient(
-                                ConnectParam.newBuilder()
-                                        .withHost(host)
-                                        .withPort(port)
-                                        .withSecure(false)
-                                        .withAuthorization("Username" + finalE, "Password" + finalE)
-                                        .build());
-                do {
-                    // 创建collection
-                    String collectionName = "collection" + finalE;
-                    FieldType fieldType1 =
-                            FieldType.newBuilder()
-                                    .withName("book_id")
-                                    .withDataType(DataType.Int64)
-                                    .withPrimaryKey(true)
-                                    .withAutoID(false)
-                                    .build();
-                    FieldType fieldType2 =
-                            FieldType.newBuilder().withName("word_count").withDataType(DataType.Int64).build();
-                    FieldType fieldType3 =
-                            FieldType.newBuilder()
-                                    .withName("book_intro")
-                                    .withDataType(DataType.FloatVector)
-                                    .withDimension(128)
-                                    .build();
-                    CreateCollectionParam createCollectionReq =
-                            CreateCollectionParam.newBuilder()
-                                    .withCollectionName(collectionName)
-                                    .withDescription("Test " + collectionName + " search")
-                                    .withShardsNum(1)
-                                    .addFieldType(fieldType1)
-                                    .addFieldType(fieldType2)
-                                    .addFieldType(fieldType3)
-                                    .build();
-                    R<RpcStatus> collection = milvusClient.createCollection(createCollectionReq);
-                    System.out.println("线程" + finalE + ":用户Username" + finalE + "创建collection：" + collectionName);
-                    System.out.println(collection.getStatus());
-                    List<InsertParam.Field> fields = CommonFunction.generateData(dataNum);
-                    R<MutationResult> insert = milvusClient.insert(InsertParam.newBuilder().withCollectionName("collection" + finalE).withFields(fields).build());
-                    System.out.println("线程" + finalE + ":用户Username" + finalE + "insert data：" + insert);
-                    R<RpcStatus> rpcStatusR =
-                            milvusClient.createIndex(
-                                    CreateIndexParam.newBuilder()
-                                            .withCollectionName("collection" + finalE)
-                                            .withFieldName(CommonData.defaultVectorField)
-                                            .withIndexName(CommonData.defaultIndex)
-                                            .withMetricType(MetricType.L2)
-                                            .withIndexType(IndexType.HNSW)
-                                            .withExtraParam(CommonFunction.provideExtraParam(IndexType.HNSW))
-                                            .withSyncMode(Boolean.TRUE)
-                                            .withSyncWaitingTimeout(30L)
-                                            .withSyncWaitingInterval(500L)
-                                            .build());
-                    System.out.println("线程" + finalE + ":用户Username" + finalE + "create index：" + rpcStatusR);
-                    R<RpcStatus> rpcStatusLoad = milvusClient.loadCollection(LoadCollectionParam.newBuilder().withCollectionName("collection" + finalE)
-                            .withSyncLoad(true)
-                            .withSyncLoadWaitingInterval(500L)
-                            .withSyncLoadWaitingTimeout(300L).build());
-                    System.out.println("线程" + finalE + ":用户Username" + finalE + "load：" + rpcStatusLoad);
-                    // search
-                    int vectorNq = nq;
-                    for (int i = 0; i < searchNum; i++) {
-                        Integer SEARCH_K = TopK; // TopK
-                        String SEARCH_PARAM = "{\"nprobe\":" + nprobe + "}";
-                        List<String> search_output_fields = Arrays.asList("book_id");
-                        List<List<Float>> search_vectors = CommonFunction.generateFloatVectors(vectorNq, 128);
-                        SearchParam searchParam =
-                                SearchParam.newBuilder()
-                                        .withCollectionName(collectionName)
-                                        .withMetricType(MetricType.L2)
-                                        .withOutFields(search_output_fields)
-                                        .withTopK(SEARCH_K)
-                                        .withVectors(search_vectors)
-                                        .withVectorFieldName(CommonData.defaultVectorField)
-                                        .withParams(SEARCH_PARAM)
-                                        .withConsistencyLevel(ConsistencyLevelEnum.BOUNDED)
-                                        .build();
-                        R<SearchResults> searchResultsR = milvusClient.search(searchParam);
-                        System.out.println("线程" + finalE + ":用户Username" + finalE + "search:" + searchResultsR);
-                    }
-                    // drop collection
-                    milvusClient.dropCollection(DropCollectionParam.newBuilder().withCollectionName(collectionName).build());
-                    System.out.println("线程" + finalE + ":用户Username" + finalE + "drop:" + collectionName);
-//
-                } while ( LocalDateTime.now().isBefore(endTime));
-
-
-            }
-
 
 
 
