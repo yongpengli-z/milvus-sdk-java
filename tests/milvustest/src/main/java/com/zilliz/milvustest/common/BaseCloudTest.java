@@ -47,7 +47,7 @@ public class BaseCloudTest extends AbstractTestNGSpringContextTests {
                           .withSecure(true)
                           .build());
 
-  @BeforeSuite(alwaysRun = true)
+//  @BeforeSuite(alwaysRun = true)
   public void initCollection() {
     logger.info(
         "**************************************************BeforeSuit**********************");
@@ -67,7 +67,7 @@ public class BaseCloudTest extends AbstractTestNGSpringContextTests {
     milvusCloudClient.createDatabase(CreateDatabaseParam.newBuilder().withDatabaseName(CommonData.databaseName1).build());
   }
 
-  @AfterSuite(alwaysRun = true)
+//  @AfterSuite(alwaysRun = true)
   public void cleanTestData() {
     logger.info(
         "**************************************************AfterSuit**********************");

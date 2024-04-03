@@ -3,7 +3,7 @@
 <suite name="Concurrent test for Java SDK">
     <test name="Concurrent Test">
         <classes>
-            <class name="com.zilliz.milvustest.businessflow.ConcurrentTest"/>
+            <class name="com.zilliz.milvustest.businessflow.ConcurrentTest2"/>
         </classes>
     </test>
     <listeners>

@@ -16,6 +16,8 @@ import io.milvus.param.credential.CreateCredentialParam;
 import io.milvus.param.credential.DeleteCredentialParam;
 import io.milvus.param.dml.InsertParam;
 import io.milvus.param.dml.SearchParam;
+import io.milvus.param.highlevel.dml.InsertRowsParam;
+import io.milvus.param.highlevel.dml.response.InsertResponse;
 import io.milvus.param.index.CreateIndexParam;
 import io.milvus.param.role.*;
 import io.milvus.response.SearchResultsWrapper;
@@ -41,11 +43,11 @@ import java.util.concurrent.*;
 public class ConcurrentTest {
      int THREAD=System.getProperty("thread") == null?10: Integer.parseInt(System.getProperty("thread"));
      int dataNum=System.getProperty("dataNum") == null?10000: Integer.parseInt(System.getProperty("dataNum"));
-     int searchNum=System.getProperty("searchNum") == null?10: Integer.parseInt(System.getProperty("searchNum"));
+     int searchNum=System.getProperty("searchNum") == null?100: Integer.parseInt(System.getProperty("searchNum"));
      int TopK=System.getProperty("TopK") == null?2: Integer.parseInt(System.getProperty("TopK"));
      int nprobe=System.getProperty("nprobe") == null?10: Integer.parseInt(System.getProperty("nprobe"));
      int nq=System.getProperty("nq") == null?10: Integer.parseInt(System.getProperty("nq"));
-     String host=System.getProperty("host") == null?"10.102.9.108": System.getProperty("host");
+     String host=System.getProperty("host") == null?"10.104.31.122": System.getProperty("host");
      int port=System.getProperty("port") == null?19530: Integer.parseInt(System.getProperty("port"));
     Object[][] objects=new Object[][]{};
     @DataProvider(name = "UserInfo")
