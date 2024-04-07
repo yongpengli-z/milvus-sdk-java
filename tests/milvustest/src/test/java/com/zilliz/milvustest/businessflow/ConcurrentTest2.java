@@ -161,10 +161,10 @@ public class ConcurrentTest2 {
                                     .addFieldType(fieldType3)
                                     .build();
                     R<RpcStatus> collection = milvusClient.createCollection(createCollectionReq);
-                    log.info("线程" + finalE + ":用户Username" + finalE + "创建collection：" + collectionName);
-                    log.info("线程" + finalE + ":用户Username" + finalE + "state：" + collection.getStatus());
+                    System.out.println("线程" + finalE + ":用户Username" + finalE + "创建collection：" + collectionName);
+                    System.out.println("线程" + finalE + ":用户Username" + finalE + "state：" + collection.getStatus());
                     R<MutationResult> insert = milvusClient.insert(InsertParam.newBuilder().withCollectionName(collectionName).withFields(fields).build());
-                    log.info("线程" + finalE + ":用户Username" + finalE + "insert data：" + insert.getStatus());
+                    System.out.println("线程" + finalE + ":用户Username" + finalE + "insert data：" + insert.getStatus());
                     R<RpcStatus> rpcStatusR =
                             milvusClient.createIndex(
                                     CreateIndexParam.newBuilder()
@@ -178,12 +178,12 @@ public class ConcurrentTest2 {
                                             .withSyncWaitingTimeout(30L)
                                             .withSyncWaitingInterval(500L)
                                             .build());
-                    log.info("线程" + finalE + ":用户Username" + finalE + "create index：" + rpcStatusR.getStatus());
+                    System.out.println("线程" + finalE + ":用户Username" + finalE + "create index：" + rpcStatusR.getStatus());
                     R<RpcStatus> rpcStatusLoad = milvusClient.loadCollection(LoadCollectionParam.newBuilder().withCollectionName(collectionName)
                             .withSyncLoad(true)
                             .withSyncLoadWaitingInterval(500L)
                             .withSyncLoadWaitingTimeout(300L).build());
-                    log.info("线程" + finalE + ":用户Username" + finalE + "load：" + rpcStatusLoad.getStatus());
+                    System.out.println("线程" + finalE + ":用户Username" + finalE + "load：" + rpcStatusLoad.getStatus());
                     // search
                     int vectorNq = nq;
                     for (int i = 0; i < searchNum; i++) {
@@ -204,11 +204,11 @@ public class ConcurrentTest2 {
                                         .withConsistencyLevel(ConsistencyLevelEnum.BOUNDED)
                                         .build();
                         R<SearchResults> searchResultsR = milvusClient.search(searchParam);
-                        log.info("线程" + finalE + ":用户Username" + finalE + "search:" + searchResultsR.getStatus());
+                        System.out.println("线程" + finalE + ":用户Username" + finalE + "search:" + searchResultsR.getStatus());
                     }
                     // drop collection
                     milvusClient.dropCollection(DropCollectionParam.newBuilder().withCollectionName(collectionName).build());
-                    log.info("线程" + finalE + ":用户Username" + finalE + "drop:" + collectionName);
+                    System.out.println("线程" + finalE + ":用户Username" + finalE + "drop:" + collectionName);
 
                 } while (  LocalDateTime.now().isBefore(endTime));
                 return finalE;
@@ -217,7 +217,7 @@ public class ConcurrentTest2 {
             list.add(future);
         }
         for (Future future : list) {
-            log.info("运行结果:"+future.get().toString());
+            System.out.println("运行结果:"+future.get().toString());
         }
 //        executorService.shutdown();
 
