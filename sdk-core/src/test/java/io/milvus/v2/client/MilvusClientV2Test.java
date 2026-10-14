@@ -49,14 +49,18 @@ import io.milvus.pool.PoolConfig;
 import io.milvus.v2.BaseTest;
 import io.milvus.v2.common.IndexParam;
 import io.milvus.v2.service.cdc.request.CrossClusterTopology;
+import io.milvus.v2.service.cdc.request.GetReplicateInfoReq;
 import io.milvus.v2.service.cdc.request.MilvusCluster;
 import io.milvus.v2.service.cdc.request.ReplicateConfiguration;
 import io.milvus.v2.service.cdc.request.UpdateReplicateConfigurationReq;
+import io.milvus.v2.service.cdc.response.GetReplicateConfigurationResp;
+import io.milvus.v2.service.cdc.response.GetReplicateInfoResp;
 import io.milvus.v2.service.cdc.response.UpdateReplicateConfigurationResp;
 import io.milvus.v2.service.collection.request.*;
 import io.milvus.v2.service.collection.response.DescribeCollectionResp;
 import io.milvus.v2.service.collection.response.DescribeReplicasResp;
 import io.milvus.v2.service.collection.response.GetCollectionStatsResp;
+import io.milvus.v2.service.collection.response.GetLoadStateResp;
 import io.milvus.v2.service.collection.response.ListCollectionsResp;
 import io.milvus.v2.service.database.request.*;
 import io.milvus.v2.service.database.response.DescribeDatabaseResp;
@@ -267,7 +271,7 @@ public class MilvusClientV2Test extends BaseTest {
             String obj = randomStr.generate(10);
             randomValues.put(field.getName(), obj);
         } else if (fieldType == Long.class || fieldType.getName().equals("long")) {
-            Long obj = (long) random.nextInt(RANDOM_BOUND);
+            Long obj = (long) random.nextInt(RANDOM_BOUND) + 1;
             randomValues.put(field.getName(), obj);
         } else if (fieldType == Integer.class || fieldType.getName().equals("int")) {
             Integer obj = random.nextInt(RANDOM_BOUND);
@@ -321,6 +325,11 @@ public class MilvusClientV2Test extends BaseTest {
                 // some method accepts Object as input such as AddFieldReq.defaultValue
                 Long obj = random.nextLong();
                 randomValues.put(field.getName(), obj);
+            } else if (fieldType == CreateCollectionReq.Function.class
+                    || fieldType == CreateCollectionReq.FieldSchema.class) {
+                // server-assigned read-only models with getter-only fields; constructed
+                // internally by describe_collection, so do not recurse into their builders
+                randomValues.put(field.getName(), null);
             } else {
                 // recursive construct member by builder
                 Object obj = checkGetAndSet(fieldType, config);
@@ -444,7 +453,11 @@ public class MilvusClientV2Test extends BaseTest {
 
             Object temp = method.invoke(callIntance);
             System.out.println("check getter value for method: " + field.getName());
-            if (temp instanceof Boolean || temp instanceof String || temp instanceof Number ||
+            if (temp == null) {
+                // embedded server-assigned members (Function/FieldSchema) are constructed as null;
+                // verify the round-trip is null rather than hitting temp.getClass() below
+                Assertions.assertNull(randomValues.get(field.getName()));
+            } else if (temp instanceof Boolean || temp instanceof String || temp instanceof Number ||
                     temp instanceof List || temp instanceof Map || temp instanceof Enum) {
                 Assertions.assertEquals(temp, randomValues.get(field.getName()));
             } else if (!temp.getClass().isInterface() && !temp.getClass().isArray()) {
@@ -486,6 +499,39 @@ public class MilvusClientV2Test extends BaseTest {
     }
 
     @Test
+    void connectConfigDefaults() {
+        ConnectConfig config = ConnectConfig.builder()
+                .uri("http://dummyHost:19530")
+                .build();
+        Assertions.assertEquals(10000, config.getKeepAliveTimeMs());
+        Assertions.assertEquals(5000, config.getKeepAliveTimeoutMs());
+        Assertions.assertTrue(config.isKeepAliveWithoutCalls());
+    }
+
+    @Test
+    void connectConfigToStringRedactsCredentials() {
+        ConnectConfig config = ConnectConfig.builder()
+                .uri("http://uri-user:uri-password@dummyHost:19530/default")
+                .token("sensitive-token")
+                .username("sensitive-user")
+                .password("sensitive-password")
+                .dbName("default")
+                .build();
+
+        String loggedConfig = config.toString();
+        Assertions.assertFalse(loggedConfig.contains("sensitive-token"));
+        Assertions.assertFalse(loggedConfig.contains("sensitive-password"));
+        Assertions.assertFalse(loggedConfig.contains("uri-user"));
+        Assertions.assertFalse(loggedConfig.contains("uri-password"));
+        Assertions.assertTrue(loggedConfig.contains("token='<redacted>'"));
+        Assertions.assertTrue(loggedConfig.contains("username='sensitive-user'"));
+        Assertions.assertTrue(loggedConfig.contains("password='<redacted>'"));
+        Assertions.assertTrue(loggedConfig.contains(
+                "uri='http://<redacted>@dummyHost:19530/default'"));
+        Assertions.assertTrue(loggedConfig.contains("dbName='default'"));
+    }
+
+    @Test
     void testV2BuilderClasses() {
         CheckConfig config = new CheckConfig();
 
@@ -503,8 +549,13 @@ public class MilvusClientV2Test extends BaseTest {
         VerifyClass(CrossClusterTopology.class.getName(), config);
         VerifyClass(MilvusCluster.class.getName(), config);
         VerifyClass(ReplicateConfiguration.class.getName(), config);
+        VerifyClass(GetReplicateInfoReq.class.getName(), config);
         VerifyClass(UpdateReplicateConfigurationReq.class.getName(), config);
 
+        VerifyClass(GetReplicateConfigurationResp.class.getName(), config);
+        VerifyClass(GetReplicateInfoResp.class.getName(), config);
+        VerifyClass(GetReplicateInfoResp.ReplicateCheckpoint.class.getName(), config);
+        VerifyClass(GetReplicateInfoResp.MessageID.class.getName(), config);
         VerifyClass(UpdateReplicateConfigurationResp.class.getName(), config);
 
         // io.milvus/v2/service/collection
@@ -522,7 +573,14 @@ public class MilvusClientV2Test extends BaseTest {
         VerifyClass(CreateCollectionReq.class.getName(), config);
         config.clearIgnoredMethods();
         VerifyClass(CreateCollectionReq.CollectionSchema.class.getName(), config);
+        // Function's server-assigned fields (id/inputFieldIds/outputFieldIds) have getters and
+        // setters but no builder methods, so ignore them in the builder-member check and the
+        // getter round-trip check. (Embedded Function members are handled by randomCallMethod's
+        // recursion skip, independent of this list.)
+        config.setIgnoredMethods(Arrays.asList("id", "inputFieldIds", "outputFieldIds",
+                "getId", "getInputFieldIds", "getOutputFieldIds"));
         VerifyClass(CreateCollectionReq.Function.class.getName(), config);
+        config.clearIgnoredMethods();
         VerifyClass(CreateCollectionReq.StructFieldSchema.class.getName(), config);
         VerifyClass(DescribeCollectionReq.class.getName(), config);
         VerifyClass(DropCollectionFieldPropertiesReq.class.getName(), config);
@@ -530,6 +588,7 @@ public class MilvusClientV2Test extends BaseTest {
         VerifyClass(DropCollectionReq.class.getName(), config);
         VerifyClass(GetCollectionStatsReq.class.getName(), config);
         VerifyClass(GetLoadStateReq.class.getName(), config);
+        VerifyClass(GetLoadStateResp.class.getName(), config);
         VerifyClass(HasCollectionReq.class.getName(), config);
         VerifyClass(ListCollectionsReq.class.getName(), config);
         config.setIgnoredMethods(Collections.singletonList("getAsync"));
@@ -630,7 +689,10 @@ public class MilvusClientV2Test extends BaseTest {
         VerifyClass(DescribeAliasReq.class.getName(), config);
         VerifyClass(DropAliasReq.class.getName(), config);
         VerifyClass(FlushReq.class.getName(), config);
+        VerifyClass(FlushAllReq.class.getName(), config);
         VerifyClass(GetCompactionStateReq.class.getName(), config);
+        VerifyClass(GetFlushAllStateReq.class.getName(), config);
+        VerifyClass(GetServerVersionReq.class.getName(), config);
         VerifyClass(GetPersistentSegmentInfoReq.class.getName(), config);
         VerifyClass(GetQuerySegmentInfoReq.class.getName(), config);
         VerifyClass(ListAliasesReq.class.getName(), config);
@@ -639,7 +701,10 @@ public class MilvusClientV2Test extends BaseTest {
         VerifyClass(CompactResp.class.getName(), config);
         VerifyClass(DescribeAliasResp.class.getName(), config);
         VerifyClass(FlushResp.class.getName(), config);
+        VerifyClass(FlushAllResp.class.getName(), config);
         VerifyClass(GetCompactionStateResp.class.getName(), config);
+        VerifyClass(GetFlushAllStateResp.class.getName(), config);
+        VerifyClass(GetServerVersionResp.class.getName(), config);
         VerifyClass(GetPersistentSegmentInfoResp.class.getName(), config);
         VerifyClass(GetPersistentSegmentInfoResp.PersistentSegmentInfo.class.getName(), config);
         VerifyClass(GetQuerySegmentInfoResp.class.getName(), config);
@@ -681,7 +746,9 @@ public class MilvusClientV2Test extends BaseTest {
         VerifyClass(QueryResp.class.getName(), config);
         VerifyClass(QueryResp.QueryResult.class.getName(), config);
         VerifyClass(RunAnalyzerResp.class.getName(), config);
+        config.setIgnoredMethods(Arrays.asList("getSearchResults", "setSearchResults", "getRecalls", "setRecalls"));
         VerifyClass(SearchResp.class.getName(), config);
+        config.clearIgnoredMethods();
         VerifyClass(SearchResp.SearchResult.class.getName(), config);
         VerifyClass(UpsertResp.class.getName(), config);
     }

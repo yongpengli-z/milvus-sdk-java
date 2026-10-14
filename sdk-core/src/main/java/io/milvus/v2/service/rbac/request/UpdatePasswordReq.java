@@ -19,15 +19,21 @@
 
 package io.milvus.v2.service.rbac.request;
 
+import static io.milvus.common.utils.RedactCredential.redactCredential;
+
 public class UpdatePasswordReq {
     private String userName;
     private String password;
     private String newPassword;
+    private Boolean resetConnection;
+    private String description;
 
     private UpdatePasswordReq(UpdatePasswordReqBuilder builder) {
         this.userName = builder.userName;
         this.password = builder.password;
         this.newPassword = builder.newPassword;
+        this.resetConnection = builder.resetConnection;
+        this.description = builder.description;
     }
 
     public String getUserName() {
@@ -54,12 +60,30 @@ public class UpdatePasswordReq {
         this.newPassword = newPassword;
     }
 
+    public Boolean getResetConnection() {
+        return resetConnection;
+    }
+
+    public void setResetConnection(Boolean resetConnection) {
+        this.resetConnection = resetConnection;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
     @Override
     public String toString() {
         return "UpdatePasswordReq{" +
                 "userName='" + userName + '\'' +
-                ", password='" + password + '\'' +
-                ", newPassword='" + newPassword + '\'' +
+                ", password='" + redactCredential(password) + '\'' +
+                ", newPassword='" + redactCredential(newPassword) + '\'' +
+                ", resetConnection=" + resetConnection +
+                ", description='" + description + '\'' +
                 '}';
     }
 
@@ -71,6 +95,8 @@ public class UpdatePasswordReq {
         private String userName;
         private String password;
         private String newPassword;
+        private Boolean resetConnection = Boolean.FALSE;
+        private String description = "";
 
         private UpdatePasswordReqBuilder() {
         }
@@ -87,6 +113,16 @@ public class UpdatePasswordReq {
 
         public UpdatePasswordReqBuilder newPassword(String newPassword) {
             this.newPassword = newPassword;
+            return this;
+        }
+
+        public UpdatePasswordReqBuilder resetConnection(Boolean resetConnection) {
+            this.resetConnection = resetConnection;
+            return this;
+        }
+
+        public UpdatePasswordReqBuilder description(String description) {
+            this.description = description;
             return this;
         }
 

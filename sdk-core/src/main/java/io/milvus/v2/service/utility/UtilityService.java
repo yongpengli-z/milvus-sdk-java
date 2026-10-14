@@ -19,6 +19,7 @@
 
 package io.milvus.v2.service.utility;
 
+import io.milvus.common.utils.cache.CollectionTsCache;
 import io.milvus.grpc.*;
 import io.milvus.v2.common.CompactionPlan;
 import io.milvus.v2.common.CompactionState;
@@ -29,6 +30,8 @@ import io.milvus.v2.service.utility.request.*;
 import io.milvus.v2.service.utility.response.*;
 import org.apache.commons.lang3.StringUtils;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -37,6 +40,28 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 public class UtilityService extends BaseService {
+    public GetServerVersionResp getServerVersion(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
+                                                 GetServerVersionReq request) {
+        if (Boolean.TRUE.equals(request.getDetail())) {
+            ConnectResponse response = blockingStub.connect(ConnectRequest.newBuilder().build());
+            rpcUtils.handleResponse("Get server version", response.getStatus());
+            ServerInfo info = response.getServerInfo();
+            return GetServerVersionResp.builder()
+                    .version(info.getBuildTags())
+                    .buildTime(info.getBuildTime())
+                    .gitCommit(info.getGitCommit())
+                    .goVersion(info.getGoVersion())
+                    .deployMode(info.getDeployMode())
+                    .build();
+        }
+
+        GetVersionResponse response = blockingStub.getVersion(GetVersionRequest.newBuilder().build());
+        rpcUtils.handleResponse("Get server version", response.getStatus());
+        return GetServerVersionResp.builder()
+                .version(response.getVersion())
+                .build();
+    }
+
     public FlushResp flush(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, FlushReq request) {
         String dbName = request.getDatabaseName();
         List<String> collectionNames = request.getCollectionNames();
@@ -67,6 +92,40 @@ public class UtilityService extends BaseService {
                 .build();
     }
 
+    public FlushAllResp flushAll(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, FlushAllReq request) {
+        String dbName = request.getDatabaseName();
+        String title = String.format("Flush all in database: '%s'", dbName);
+
+        FlushAllRequest.Builder builder = FlushAllRequest.newBuilder();
+        if (StringUtils.isNotEmpty(dbName)) {
+            builder.setDbName(dbName);
+        }
+        FlushAllResponse response = blockingStub.flushAll(builder.build());
+        rpcUtils.handleResponse(title, response.getStatus());
+
+        return FlushAllResp.builder()
+                .flushAllTs(response.getFlushAllTs())
+                .build();
+    }
+
+    public GetFlushAllStateResp getFlushAllState(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
+                                                 GetFlushAllStateReq request) {
+        String dbName = request.getDatabaseName();
+        String title = String.format("Get flush all state in database: '%s'", dbName);
+
+        GetFlushAllStateRequest.Builder builder = GetFlushAllStateRequest.newBuilder()
+                .setFlushAllTs(request.getFlushAllTs());
+        if (StringUtils.isNotEmpty(dbName)) {
+            builder.setDbName(dbName);
+        }
+        GetFlushAllStateResponse response = blockingStub.getFlushAllState(builder.build());
+        rpcUtils.handleResponse(title, response.getStatus());
+
+        return GetFlushAllStateResp.builder()
+                .flushed(response.getFlushed())
+                .build();
+    }
+
     // this method is internal use, not expose to user
     public Void waitFlush(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, FlushResp flushResp) {
         Map<String, List<Long>> collectionSegmentIDs = flushResp.getCollectionSegmentIDs();
@@ -86,12 +145,43 @@ public class UtilityService extends BaseService {
                     try {
                         TimeUnit.SECONDS.sleep(1);
                     } catch (InterruptedException t) {
-                        System.out.println("Interrupted: " + t.getMessage());
+                        Thread.currentThread().interrupt();
+                        logger.warn("Interrupted while waiting for flush", t);
                         break;
                     }
                 }
             }
         });
+
+        return null;
+    }
+
+    // this method is internal use, not expose to user
+    public Void waitFlushAll(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, FlushAllResp flushAllResp,
+                             FlushAllReq request) {
+        boolean flushed = false;
+        long start = System.currentTimeMillis();
+        while (!flushed) {
+            GetFlushAllStateResp flushAllStateResp = getFlushAllState(blockingStub, GetFlushAllStateReq.builder()
+                    .databaseName(request.getDatabaseName())
+                    .flushAllTs(flushAllResp.getFlushAllTs())
+                    .build());
+
+            flushed = Boolean.TRUE.equals(flushAllStateResp.getFlushed());
+            if (!flushed) {
+                Long timeout = request.getWaitFlushedTimeoutMs();
+                if (timeout != null && timeout > 0L && System.currentTimeMillis() - start > timeout) {
+                    throw new MilvusClientException(ErrorCode.CLIENT_ERROR,
+                            "wait for flush all timeout, flush_all_ts: " + flushAllResp.getFlushAllTs());
+                }
+                try {
+                    TimeUnit.SECONDS.sleep(5);
+                } catch (InterruptedException t) {
+                    Thread.currentThread().interrupt();
+                    throw new MilvusClientException(ErrorCode.CLIENT_ERROR, "Interrupted while waiting for flush all");
+                }
+            }
+        }
 
         return null;
     }
@@ -111,9 +201,13 @@ public class UtilityService extends BaseService {
 
         ManualCompactionRequest.Builder builder = ManualCompactionRequest.newBuilder()
                 .setCollectionID(descResponse.getCollectionID())
-                .setMajorCompaction(request.getIsClustering());
+                .setMajorCompaction(request.getIsClustering())
+                .setL0Compaction(request.getIsL0());
         if (StringUtils.isNotEmpty(dbName)) {
             builder.setDbName(dbName);
+        }
+        if (request.getTargetSize() != null) {
+            builder.setTargetSize(convertTargetSizeToMB(request));
         }
         ManualCompactionResponse response = blockingStub.manualCompaction(builder.build());
         rpcUtils.handleResponse(title, response.getStatus());
@@ -121,6 +215,65 @@ public class UtilityService extends BaseService {
         return CompactResp.builder()
                 .compactionID(response.getCompactionID())
                 .build();
+    }
+
+    /**
+     * Converts the requested {@code target_size} (with an optional unit, default MB) into MB before
+     * it is sent to the server, and rejects non-positive values and values that are too small to
+     * reach 1 MB. Supported units: b, kb, mb, gb, tb, pb.
+     * This mirrors the PyMilvus {@code parse_target_size} behavior.
+     */
+    private long convertTargetSizeToMB(CompactReq request) {
+        Long targetSize = request.getTargetSize();
+        if (targetSize <= 0) {
+            throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                    "targetSize must be a positive integer, got " + targetSize);
+        }
+        // blank/whitespace-only unit means "unset", default to MB
+        String unit = StringUtils.isBlank(request.getTargetSizeUnit())
+                ? "mb" : request.getTargetSizeUnit().trim().toLowerCase();
+        long unitBytes;
+        switch (unit) {
+            case "b":
+                unitBytes = 1L;
+                break;
+            case "kb":
+                unitBytes = 1024L;
+                break;
+            case "mb":
+                unitBytes = 1024L * 1024L;
+                break;
+            case "gb":
+                unitBytes = 1024L * 1024L * 1024L;
+                break;
+            case "tb":
+                unitBytes = 1024L * 1024L * 1024L * 1024L;
+                break;
+            case "pb":
+                unitBytes = 1024L * 1024L * 1024L * 1024L * 1024L;
+                break;
+            default:
+                throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                        "Invalid targetSizeUnit: '" + request.getTargetSizeUnit()
+                                + "'. Supported units: b, kb, mb, gb, tb, pb");
+        }
+        // Overflow-safe conversion: use BigDecimal so large values (e.g. tb/pb) do not overflow long.
+        // Reject values exceeding the int64 range, mirroring PyMilvus parse_target_size.
+        BigDecimal sizeMbBd = BigDecimal.valueOf(targetSize)
+                .multiply(BigDecimal.valueOf(unitBytes))
+                .divide(BigDecimal.valueOf(1024L * 1024L), 0, RoundingMode.FLOOR);
+        if (sizeMbBd.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) > 0) {
+            throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                    "target size too large: " + targetSize + request.getTargetSizeUnit()
+                            + ", must be at most " + Long.MAX_VALUE + "MB");
+        }
+        long sizeMb = sizeMbBd.longValue();
+        if (sizeMb <= 0) {
+            throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                    "target size too small: " + targetSize + request.getTargetSizeUnit()
+                            + ", must be at least 1MB");
+        }
+        return sizeMb;
     }
 
     public GetCompactionStateResp getCompactionState(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
@@ -133,7 +286,7 @@ public class UtilityService extends BaseService {
         rpcUtils.handleResponse(title, response.getStatus());
 
         return GetCompactionStateResp.builder()
-                .state(CompactionState.valueOf(response.getState().name()))
+                .state(CompactionState.forNumber(response.getState().getNumber()))
                 .executingPlanNo(response.getExecutingPlanNo())
                 .timeoutPlanNo(response.getTimeoutPlanNo())
                 .completedPlanNo(response.getCompletedPlanNo())
@@ -159,7 +312,7 @@ public class UtilityService extends BaseService {
         });
 
         return GetCompactionPlansResp.builder()
-                .state(CompactionState.valueOf(response.getState().name()))
+                .state(CompactionState.forNumber(response.getState().getNumber()))
                 .plans(plans)
                 .build();
     }
@@ -178,6 +331,10 @@ public class UtilityService extends BaseService {
 
         Status status = blockingStub.createAlias(createAliasRequestBuilder.build());
         rpcUtils.handleResponse(title, status);
+        invalidateSchemaCache(dbName, alias);
+        CollectionTsCache.getInstance().copy(
+                getEndpoint(), actualDbName(dbName), collectionName,
+                actualDbName(dbName), alias);
 
         return null;
     }
@@ -193,6 +350,8 @@ public class UtilityService extends BaseService {
         }
         Status status = blockingStub.dropAlias(dropAliasRequestBuilder.build());
         rpcUtils.handleResponse(title, status);
+        invalidateSchemaCache(dbName, alias);
+        invalidateTsCache(dbName, alias);
 
         return null;
     }
@@ -211,6 +370,10 @@ public class UtilityService extends BaseService {
 
         Status status = blockingStub.alterAlias(alterAliasRequestBuilder.build());
         rpcUtils.handleResponse(title, status);
+        invalidateSchemaCache(dbName, alias);
+        CollectionTsCache.getInstance().copy(
+                getEndpoint(), actualDbName(dbName), collectionName,
+                actualDbName(dbName), alias);
 
         return null;
     }
@@ -248,6 +411,7 @@ public class UtilityService extends BaseService {
         rpcUtils.handleResponse(title, response.getStatus());
         return ListAliasResp.builder()
                 .collectionName(response.getCollectionName())
+                .dbName(response.getDbName())
                 .alias(response.getAliasesList())
                 .build();
     }
@@ -285,9 +449,11 @@ public class UtilityService extends BaseService {
                     .segmentID(info.getSegmentID())
                     .collectionID(info.getCollectionID())
                     .partitionID(info.getPartitionID())
+                    .collectionName(collectionName)
                     .numOfRows(info.getNumRows())
                     .state(info.getState().name())
                     .level(info.getLevel().name())
+                    .storageVersion(info.getStorageVersion())
                     .isSorted(info.getIsSorted())
                     .build());
         });
@@ -322,7 +488,9 @@ public class UtilityService extends BaseService {
                     .state(info.getState().name())
                     .level(info.getLevel().name())
                     .nodeIDs(info.getNodeIdsList())
+                    .storageVersion(info.getStorageVersion())
                     .isSorted(info.getIsSorted())
+                    .collectionName(collectionName)
                     .build());
         });
         return GetQuerySegmentInfoResp.builder()

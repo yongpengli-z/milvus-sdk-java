@@ -23,11 +23,17 @@ public class CompactReq {
     private String databaseName;
     private String collectionName;
     private Boolean isClustering = Boolean.FALSE;
+    private Boolean isL0 = Boolean.FALSE;
+    private Long targetSize; // target size of compacted segments, null means server default
+    private String targetSizeUnit = "mb"; // unit of targetSize: "b", "kb", "mb" (default), "gb", "tb", "pb"
 
     private CompactReq(CompactReqBuilder builder) {
         this.databaseName = builder.databaseName;
         this.collectionName = builder.collectionName;
         this.isClustering = builder.isClustering;
+        this.isL0 = builder.isL0;
+        this.targetSize = builder.targetSize;
+        this.targetSizeUnit = builder.targetSizeUnit;
     }
 
     public static CompactReqBuilder builder() {
@@ -58,12 +64,39 @@ public class CompactReq {
         this.isClustering = isClustering;
     }
 
+    public Boolean getIsL0() {
+        return isL0;
+    }
+
+    public void setIsL0(Boolean isL0) {
+        this.isL0 = isL0;
+    }
+
+    public Long getTargetSize() {
+        return targetSize;
+    }
+
+    public void setTargetSize(Long targetSize) {
+        this.targetSize = targetSize;
+    }
+
+    public String getTargetSizeUnit() {
+        return targetSizeUnit;
+    }
+
+    public void setTargetSizeUnit(String targetSizeUnit) {
+        this.targetSizeUnit = targetSizeUnit;
+    }
+
     @Override
     public String toString() {
         return "CompactReq{" +
                 "databaseName='" + databaseName + '\'' +
                 ", collectionName='" + collectionName + '\'' +
                 ", isClustering=" + isClustering +
+                ", isL0=" + isL0 +
+                ", targetSize=" + targetSize +
+                ", targetSizeUnit='" + targetSizeUnit + '\'' +
                 '}';
     }
 
@@ -71,6 +104,9 @@ public class CompactReq {
         private String databaseName;
         private String collectionName;
         private Boolean isClustering = Boolean.FALSE;
+        private Boolean isL0 = Boolean.FALSE;
+        private Long targetSize;
+        private String targetSizeUnit = "mb";
 
         public CompactReqBuilder databaseName(String databaseName) {
             this.databaseName = databaseName;
@@ -84,6 +120,21 @@ public class CompactReq {
 
         public CompactReqBuilder isClustering(Boolean isClustering) {
             this.isClustering = isClustering;
+            return this;
+        }
+
+        public CompactReqBuilder isL0(Boolean isL0) {
+            this.isL0 = isL0;
+            return this;
+        }
+
+        public CompactReqBuilder targetSize(Long targetSize) {
+            this.targetSize = targetSize;
+            return this;
+        }
+
+        public CompactReqBuilder targetSizeUnit(String targetSizeUnit) {
+            this.targetSizeUnit = targetSizeUnit;
             return this;
         }
 

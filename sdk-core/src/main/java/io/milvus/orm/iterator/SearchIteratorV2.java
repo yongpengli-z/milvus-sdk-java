@@ -50,8 +50,9 @@ public class SearchIteratorV2 {
 
     private Map<String, Object> searchParams;
     private final RpcUtils rpcUtils;
+    private final VectorUtils vectorUtils;
 
-    private Integer leftResCnt = null;
+    private Long leftResCnt = null;
     private Long collectionID = null;
     private Function<List<SearchResp.SearchResult>, List<SearchResp.SearchResult>> externalFilterFunc = null;
     private List<SearchResp.SearchResult> cache = new ArrayList<>();
@@ -65,10 +66,13 @@ public class SearchIteratorV2 {
         this.batchSize = (int) searchIteratorReq.getBatchSize();
         this.externalFilterFunc = searchIteratorReq.getExternalFilterFunc();
         this.rpcUtils = new RpcUtils();
+        this.vectorUtils = new VectorUtils();
+        this.vectorUtils.setEndpoint(blockingStub.getEndpoint());
+        this.vectorUtils.setCurrentDbName(blockingStub.getDatabaseName());
 
         checkParams();
         setupCollectionID();
-        probeForCompability();
+        probeForCompatibility();
     }
 
     private void checkParams() {
@@ -91,7 +95,7 @@ public class SearchIteratorV2 {
         }
 
         if (searchIteratorReq.getLimit() != UNLIMITED) {
-            this.leftResCnt = (int) searchIteratorReq.getLimit();
+            this.leftResCnt = searchIteratorReq.getLimit();
         }
     }
 
@@ -129,7 +133,7 @@ public class SearchIteratorV2 {
                 .groupByFieldName(searchIteratorReq.getGroupByFieldName())
                 .filterTemplateValues(searchIteratorReq.getFilterTemplateValues())
                 .build();
-        SearchRequest searchRequest = new VectorUtils().ConvertToGrpcSearchRequest(request);
+        SearchRequest searchRequest = vectorUtils.ConvertToGrpcSearchRequest(request);
         SearchResults response = rpcUtils.retry(() -> blockingStub.get().search(searchRequest));
         String title = String.format("SearchRequest collectionName:%s", searchIteratorReq.getCollectionName());
         rpcUtils.handleResponse(title, response.getStatus());
@@ -137,14 +141,15 @@ public class SearchIteratorV2 {
         return response;
     }
 
-    private void probeForCompability() {
+    private void probeForCompatibility() {
         searchParams.put("collection_id", this.collectionID);
         searchParams.put("iterator", true);
         searchParams.put("search_iter_v2", true);
-        searchParams.put("guarantee_timestamp", 0L);
+        searchParams.putIfAbsent("guarantee_timestamp", 0L);
 
-        SearchResultData resultData = executeSearch(1).getResults();
-        checkTokenExists(resultData);
+        SearchResults response = executeSearch(1);
+        checkTokenExists(response.getResults());
+        setupGuaranteeTimestamp(response);
     }
 
     private void checkTokenExists(SearchResultData resultData) {
@@ -159,6 +164,7 @@ public class SearchIteratorV2 {
 
     public List<SearchResp.SearchResult> next() {
         if (leftResCnt != null && leftResCnt <= 0) {
+            cache.clear();
             return new ArrayList<>();
         }
 
@@ -168,7 +174,7 @@ public class SearchIteratorV2 {
 
         int targetLen = batchSize;
         if (leftResCnt != null && leftResCnt < targetLen) {
-            targetLen = leftResCnt;
+            targetLen = leftResCnt.intValue();
         }
 
         while (true) {
@@ -205,7 +211,14 @@ public class SearchIteratorV2 {
             searchParams.put("search_iter_id", iterInfo.getToken());
         }
 
-        long ts = (long) searchParams.get("guarantee_timestamp");
+        setupGuaranteeTimestamp(response);
+
+        List<List<SearchResp.SearchResult>> res = new ConvertUtils().getEntities(response);
+        return res.get(0);
+    }
+
+    private void setupGuaranteeTimestamp(SearchResults response) {
+        long ts = ((Number) searchParams.get("guarantee_timestamp")).longValue();
         if (ts <= 0) {
             if (response.getSessionTs() > 0) {
                 searchParams.put("guarantee_timestamp", response.getSessionTs());
@@ -217,9 +230,6 @@ public class SearchIteratorV2 {
                 searchParams.put("guarantee_timestamp", clientTs);
             }
         }
-
-        List<List<SearchResp.SearchResult>> res = new ConvertUtils().getEntities(response);
-        return res.get(0);
     }
 
     private List<SearchResp.SearchResult> wrapReturnRes(List<SearchResp.SearchResult> res) {
@@ -229,12 +239,16 @@ public class SearchIteratorV2 {
 
         int currentLen = res.size();
         if (currentLen > leftResCnt) {
-            res = res.subList(0, leftResCnt);
+            res = new ArrayList<>(res.subList(0, leftResCnt.intValue()));
         }
-        leftResCnt -= currentLen;
+        leftResCnt = Math.max(0L, leftResCnt - res.size());
+        if (leftResCnt == 0) {
+            cache.clear();
+        }
         return res;
     }
 
     public void close() {
+        cache.clear();
     }
 }

@@ -19,13 +19,27 @@
 
 package io.milvus.v2.service.cdc.request;
 
+import java.util.ArrayList;
 import java.util.List;
+
+import static io.milvus.common.utils.RedactCredential.redactCredential;
+import static io.milvus.common.utils.RedactCredential.redactUriUserInfo;
 
 public class MilvusCluster {
     private String clusterId;
     private String uri;
     private String token;
     private List<String> pchannels;
+
+    public static MilvusCluster fromGRPC(io.milvus.grpc.MilvusCluster cluster) {
+        io.milvus.grpc.ConnectionParam connectionParam = cluster.getConnectionParam();
+        return MilvusCluster.builder()
+                .clusterId(cluster.getClusterId())
+                .uri(connectionParam.getUri())
+                .token(connectionParam.getToken())
+                .pchannels(new ArrayList<>(cluster.getPchannelsList()))
+                .build();
+    }
 
     public io.milvus.grpc.MilvusCluster toGRPC() {
         io.milvus.grpc.ConnectionParam.Builder connectionParamBuilder = io.milvus.grpc.ConnectionParam.newBuilder()
@@ -86,8 +100,8 @@ public class MilvusCluster {
     public String toString() {
         return "MilvusCluster{" +
                 "clusterId='" + clusterId + '\'' +
-                ", uri='" + uri + '\'' +
-                ", token='" + token + '\'' +
+                ", uri='" + redactUriUserInfo(uri) + '\'' +
+                ", token='" + redactCredential(token) + '\'' +
                 ", pchannels=" + pchannels +
                 '}';
     }

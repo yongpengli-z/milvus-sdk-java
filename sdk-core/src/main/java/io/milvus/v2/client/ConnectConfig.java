@@ -23,10 +23,14 @@ import io.milvus.common.utils.URLParser;
 import org.apache.commons.lang3.StringUtils;
 
 import javax.net.ssl.SSLContext;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 import static io.milvus.common.constant.MilvusClientConstant.MilvusConsts.CLOUD_SERVERLESS_URI_REGEX;
+import static io.milvus.common.utils.RedactCredential.redactCredential;
+import static io.milvus.common.utils.RedactCredential.redactUriUserInfo;
 
 public class ConnectConfig {
     private String uri;
@@ -35,9 +39,9 @@ public class ConnectConfig {
     private String password;
     private String dbName;
     private long connectTimeoutMs = 10000;
-    private long keepAliveTimeMs = 55000;
-    private long keepAliveTimeoutMs = 20000;
-    private boolean keepAliveWithoutCalls = false;
+    private long keepAliveTimeMs = 10000;
+    private long keepAliveTimeoutMs = 5000;
+    private boolean keepAliveWithoutCalls = true;
     private long rpcDeadlineMs = 0; // Disabling deadline
 
     private String clientKeyPath;
@@ -49,6 +53,7 @@ public class ConnectConfig {
     private Boolean secure = false;
     private long idleTimeoutMs = TimeUnit.MILLISECONDS.convert(24, TimeUnit.HOURS);
     private boolean enablePrecheck = false;  // default value is false
+    private Map<String, String> option = new HashMap<>();
 
     private SSLContext sslContext;
     // clientRequestId maintains a map for different threads, each thread can assign a specific id.
@@ -81,6 +86,7 @@ public class ConnectConfig {
         this.sslContext = builder.sslContext;
         this.clientRequestId = builder.clientRequestId;
         this.enablePrecheck = builder.enablePrecheck;
+        this.option = builder.option;
     }
 
     public static ConnectConfigBuilder builder() {
@@ -167,6 +173,10 @@ public class ConnectConfig {
     public boolean isEnablePrecheck() {
         return enablePrecheck;
     }
+
+    public Map<String, String> getOption() {
+        return option;
+    }
     // Setters
     public void setUri(String uri) {
         if (uri == null) {
@@ -243,6 +253,10 @@ public class ConnectConfig {
         this.enablePrecheck = enablePrecheck;
     }
 
+    public void setOption(Map<String, String> option) {
+        this.option = option;
+    }
+
     public void setIdleTimeoutMs(long idleTimeoutMs) {
         this.idleTimeoutMs = idleTimeoutMs;
     }
@@ -293,10 +307,10 @@ public class ConnectConfig {
     @Override
     public String toString() {
         return "ConnectConfig{" +
-                "uri='" + uri + '\'' +
-                ", token='" + token + '\'' +
+                "uri='" + redactUriUserInfo(uri) + '\'' +
+                ", token='" + redactCredential(token) + '\'' +
                 ", username='" + username + '\'' +
-                ", password='" + password + '\'' +
+                ", password='" + redactCredential(password) + '\'' +
                 ", dbName='" + dbName + '\'' +
                 ", connectTimeoutMs=" + connectTimeoutMs +
                 ", keepAliveTimeMs=" + keepAliveTimeMs +
@@ -324,9 +338,9 @@ public class ConnectConfig {
         private String password;
         private String dbName;
         private long connectTimeoutMs = 10000;
-        private long keepAliveTimeMs = 55000;
-        private long keepAliveTimeoutMs = 20000;
-        private boolean keepAliveWithoutCalls = false;
+        private long keepAliveTimeMs = 10000;
+        private long keepAliveTimeoutMs = 5000;
+        private boolean keepAliveWithoutCalls = true;
         private long rpcDeadlineMs = 0;
         private String clientKeyPath;
         private String clientPemPath;
@@ -339,6 +353,7 @@ public class ConnectConfig {
         private SSLContext sslContext;
         private ThreadLocal<String> clientRequestId;
         private boolean enablePrecheck = false;
+        private Map<String, String> option = new HashMap<>();
 
         public ConnectConfigBuilder uri(String uri) {
             if (uri == null) {
@@ -448,6 +463,11 @@ public class ConnectConfig {
 
         public ConnectConfigBuilder clientRequestId(ThreadLocal<String> clientRequestId) {
             this.clientRequestId = clientRequestId;
+            return this;
+        }
+
+        public ConnectConfigBuilder option(Map<String, String> option) {
+            this.option = option;
             return this;
         }
 

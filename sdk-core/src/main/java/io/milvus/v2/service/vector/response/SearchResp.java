@@ -28,11 +28,19 @@ public class SearchResp {
     private List<List<SearchResult>> searchResults;
     private long sessionTs; // default eventually ts
     private List<Float> recalls;
+    private Long cost;
+    private Long scannedRemoteBytes;
+    private Long scannedTotalBytes;
+    private Float cacheHitRatio;
 
     private SearchResp(SearchRespBuilder builder) {
         this.searchResults = builder.searchResults;
         this.sessionTs = builder.sessionTs;
         this.recalls = builder.recalls;
+        this.cost = builder.cost;
+        this.scannedRemoteBytes = builder.scannedRemoteBytes;
+        this.scannedTotalBytes = builder.scannedTotalBytes;
+        this.cacheHitRatio = builder.cacheHitRatio;
     }
 
     public static SearchRespBuilder builder() {
@@ -63,12 +71,48 @@ public class SearchResp {
         this.recalls = recalls;
     }
 
+    public Long getCost() {
+        return cost;
+    }
+
+    public void setCost(Long cost) {
+        this.cost = cost;
+    }
+
+    public Long getScannedRemoteBytes() {
+        return scannedRemoteBytes;
+    }
+
+    public void setScannedRemoteBytes(Long scannedRemoteBytes) {
+        this.scannedRemoteBytes = scannedRemoteBytes;
+    }
+
+    public Long getScannedTotalBytes() {
+        return scannedTotalBytes;
+    }
+
+    public void setScannedTotalBytes(Long scannedTotalBytes) {
+        this.scannedTotalBytes = scannedTotalBytes;
+    }
+
+    public Float getCacheHitRatio() {
+        return cacheHitRatio;
+    }
+
+    public void setCacheHitRatio(Float cacheHitRatio) {
+        this.cacheHitRatio = cacheHitRatio;
+    }
+
     @Override
     public String toString() {
         return "SearchResp{" +
                 "searchResults=" + searchResults +
                 ", sessionTs=" + sessionTs +
                 ", recalls=" + recalls +
+                ", cost=" + cost +
+                ", scannedRemoteBytes=" + scannedRemoteBytes +
+                ", scannedTotalBytes=" + scannedTotalBytes +
+                ", cacheHitRatio=" + cacheHitRatio +
                 '}';
     }
 
@@ -76,6 +120,10 @@ public class SearchResp {
         private List<List<SearchResult>> searchResults = new ArrayList<>();
         private long sessionTs = 1L; // default eventually ts
         private List<Float> recalls = new ArrayList<>();
+        private Long cost;
+        private Long scannedRemoteBytes;
+        private Long scannedTotalBytes;
+        private Float cacheHitRatio;
 
         public SearchRespBuilder searchResults(List<List<SearchResult>> searchResults) {
             this.searchResults = searchResults;
@@ -92,6 +140,26 @@ public class SearchResp {
             return this;
         }
 
+        public SearchRespBuilder cost(Long cost) {
+            this.cost = cost;
+            return this;
+        }
+
+        public SearchRespBuilder scannedRemoteBytes(Long scannedRemoteBytes) {
+            this.scannedRemoteBytes = scannedRemoteBytes;
+            return this;
+        }
+
+        public SearchRespBuilder scannedTotalBytes(Long scannedTotalBytes) {
+            this.scannedTotalBytes = scannedTotalBytes;
+            return this;
+        }
+
+        public SearchRespBuilder cacheHitRatio(Float cacheHitRatio) {
+            this.cacheHitRatio = cacheHitRatio;
+            return this;
+        }
+
         public SearchResp build() {
             return new SearchResp(this);
         }
@@ -103,6 +171,7 @@ public class SearchResp {
         private Object id;
         private String primaryKey;
         private Map<String, HighlightResult> highlightResults;
+        private Long elementOffset;
 
         private SearchResult(SearchResultBuilder builder) {
             this.entity = builder.entity;
@@ -110,6 +179,7 @@ public class SearchResp {
             this.id = builder.id;
             this.primaryKey = builder.primaryKey;
             this.highlightResults = builder.highlightResults == null ? new HashMap<>() : builder.highlightResults;
+            this.elementOffset = builder.elementOffset;
         }
 
         public static SearchResultBuilder builder() {
@@ -161,10 +231,19 @@ public class SearchResp {
             this.highlightResults.put(fieldName, highlightResult);
         }
 
+        public Long getElementOffset() {
+            return elementOffset;
+        }
+
+        public void setElementOffset(Long elementOffset) {
+            this.elementOffset = elementOffset;
+        }
+
         @Override
         public String toString() {
             return "{" + getPrimaryKey() + ": " + getId() + ", Score: " + getScore() + ", OutputFields: " + entity +
-                    (MapUtils.isEmpty(highlightResults) ? "" : (", HighlightResults: " + highlightResults)) + "}";
+                    (MapUtils.isEmpty(highlightResults) ? "" : (", HighlightResults: " + highlightResults)) +
+                    (elementOffset == null ? "" : (", ElementOffset: " + elementOffset)) + "}";
         }
 
         public static class SearchResultBuilder {
@@ -173,6 +252,7 @@ public class SearchResp {
             private Object id;
             private String primaryKey = "id";
             private Map<String, HighlightResult> highlightResults = new HashMap<>();
+            private Long elementOffset;
 
             public SearchResultBuilder entity(Map<String, Object> entity) {
                 this.entity = entity;
@@ -202,6 +282,11 @@ public class SearchResp {
             public SearchResultBuilder addHighlightResult(String fieldName, HighlightResult highlightResult) {
                 if (this.highlightResults == null) this.highlightResults = new HashMap<>();
                 this.highlightResults.put(fieldName, highlightResult);
+                return this;
+            }
+
+            public SearchResultBuilder elementOffset(Long elementOffset) {
+                this.elementOffset = elementOffset;
                 return this;
             }
 

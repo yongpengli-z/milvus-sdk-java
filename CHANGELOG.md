@@ -1,5 +1,118 @@
 # Changelog
 
+## milvus-sdk-java 2.6.25 (2026-09-03)
+
+### Improvement
+- Surface describeCollection aliases, consistency level, namespace, schema version, update timestamp, and field/function IDs
+- Expose dbName in listAliases and collectionName in getQuerySegmentInfo
+- Return empty results without issuing an RPC for empty insert/upsert/get input
+- Support load priority and target size unit in compact
+- Map dbName into privilege grants for grant/revoke privilege
+- Validate createCollection numeric bounds, index field names, and query limits
+- Decode cost from status extra info for insert/upsert/delete
+- Guard alterIndexProperties against null properties
+- Send num_partitions/properties on fast-path createCollection
+- Reject null index fieldName and empty index_params with checked errors
+- Enforce createCollection numeric bounds; guard alterIndexProperties null properties; set delete consistency level
+
+## milvus-sdk-java 2.6.24 (2026-08-21)
+### Feature
+- Support async DQL interfaces for MilvusClientV2
+
+### Bug
+- Preserve empty database names for serverless requests
+- Avoid sending empty analyzer params in runAnalyzer
+- Clean async tasks when shutdown
+
+## milvus-sdk-java 2.6.23 (2026-08-05)
+### Improvement
+- Align insert and upsert data validation with PyMilvus
+- Refine schema and session-timestamp caching across clients, iterators, collection DDL, and global-cluster failover
+- Redact authentication secrets from diagnostic output
+
+### Bug
+- Release consumed iterator cache state to avoid memory retention
+
+## milvus-sdk-java 2.6.22 (2026-06-29)
+### Improvement
+- Improve volume upload interaction
+- Align describeUser/describeRole with PyMilvus
+- Align getCollectionStats/getPartitionStats with PyMilvus
+- Align search response with PyMilvus
+
+### Bug
+- Fix a bug for LexicalHighlighter
+
+## milvus-sdk-java 2.6.21 (2026-06-18)
+### Feature
+- Support dumpMessages interface for MilvusClientV2
+- Add rich server version response for MilvusClientV2
+- Add flushAll/getFlushAllState for MilvusClientV2
+- Add getReplicateConfiguration/getReplicateInfo interfaces for MilvusClientV2
+- Add role and user description support for MilvusClientV2 RBAC APIs
+
+### Improvement
+- Align getLoadState/loadCollection/loadPartitions with PyMilvus
+- Enhance GetPersistentSegmentInfo/GetQuerySegmentInfo responses
+
+### Bug
+- Fix RpcUtils.retry() silently swallowing timeout and max-retry exceptions, returning null
+
+## milvus-sdk-java 2.6.20 (2026-05-15)
+### Feature
+- Support field-level operations for upsert
+
+## milvus-sdk-java 2.6.19 (2026-05-13)
+### Feature
+- Add projectId and regionId support for cloud import interfaces
+- Add volume describe API and external volume support
+- Add collection ID support for describeCollection() and batchDescribeCollection()
+
+### Improvement
+- Add option parameters to ConnectConfig and ConnectParam
+- Align request identifier behavior with PyMilvus
+
+## milvus-sdk-java 2.6.18 (2026-04-23)
+### Feature
+- Add external collection API support for MilvusClientV2
+- Add file resource interfaces for MilvusClientV2
+
+### Improvement
+- Shade grpc to avoid version conflicts with user dependencies
+
+## milvus-sdk-java 2.6.17 (2026-04-02)
+### Feature
+- Add optimize() interface for MilvusClientV2
+
+### Improvement
+- Add forceDrop flag for dropRole() interface
+
+## milvus-sdk-java 2.6.16 (2026-03-19)
+### Feature
+- Add truncateCollection() interface for MilvusClientV2
+
+### Bug
+- Fix a potential risk to send multiple http requests to global cluster endpoint in short time
+- Fix NoSuchMethodError on Java 8 for java.nio.ByteBuffer when querying with sparse vector field
+
+## milvus-sdk-java 2.6.15 (2026-03-09)
+### Feature
+- Add client support for global cluster
+
+### Bug
+- Fix a bug that Struct field name is missed in response of describeCollection()
+
+## milvus-sdk-java 2.6.14 (2026-02-12)
+### Feature
+- Support AISAQ index type
+- Support element_filter for struct field
+
+### Improvement
+- Change keepAliveTimeMs from 55s to 10s, keepAliveTimeoutMs from 20s to 5s, and enable keepAliveWithoutCalls by default in both ConnectParam (V1) and ConnectConfig (V2).
+
+### Bug
+- Fix a bug in ClientPool where the RPC channel was not properly closed
+
 ## milvus-sdk-java 2.6.13 (2026-01-21)
 ### Feature
 - Support search by id
@@ -868,4 +981,3 @@
 - \#23 - Format code with Google-java-style and add Apache 2.0 license header
 - \#28 - add examples
 - \#29 - add README
-

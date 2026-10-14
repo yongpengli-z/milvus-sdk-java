@@ -25,6 +25,7 @@ import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
 import io.grpc.stub.MetadataUtils;
+import io.milvus.common.interceptor.IdentifierInterceptor;
 import io.milvus.common.utils.ExceptionUtils;
 import io.milvus.exception.MilvusException;
 import io.milvus.exception.ServerException;
@@ -71,16 +72,18 @@ import java.util.concurrent.TimeUnit;
 public class MilvusServiceClient extends AbstractMilvusGrpcClient {
 
     private ManagedChannel channel;
-    private final MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub;
-    private final MilvusServiceGrpc.MilvusServiceFutureStub futureStub;
+    private MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub;
+    private MilvusServiceGrpc.MilvusServiceFutureStub futureStub;
     private final long rpcDeadlineMs;
     private long timeoutMs = 0;
     private RetryParam retryParam = RetryParam.newBuilder().build();
     private String currentDatabaseName;
+    private final String endpoint;
 
     public MilvusServiceClient(ConnectParam connectParam) {
         ExceptionUtils.checkNotNull(connectParam, connectParam.getClass().getSimpleName());
         this.rpcDeadlineMs = connectParam.getRpcDeadlineMs();
+        this.endpoint = connectParam.getHost() + ":" + connectParam.getPort();
 
         Metadata metadata = new Metadata();
         metadata.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), connectParam.getAuthorization());
@@ -186,6 +189,7 @@ public class MilvusServiceClient extends AbstractMilvusGrpcClient {
         assert channel != null;
 
         try {
+            // Use a temporary stub to call Connect RPC and obtain the server-assigned identifier
             blockingStub = MilvusServiceGrpc.newBlockingStub(channel);
             futureStub = MilvusServiceGrpc.newFutureStub(channel);
 
@@ -198,6 +202,14 @@ public class MilvusServiceClient extends AbstractMilvusGrpcClient {
                 logError(msg);
                 throw new RuntimeException(msg);
             }
+
+            // Wrap channel with identifier interceptor so that every subsequent RPC
+            // carries the identifier in gRPC metadata, aligning with pymilvus behavior.
+            long identifier = resp.getData().getIdentifier();
+            Channel interceptedChannel = ClientInterceptors.intercept(channel,
+                    new IdentifierInterceptor(identifier));
+            blockingStub = MilvusServiceGrpc.newBlockingStub(interceptedChannel);
+            futureStub = MilvusServiceGrpc.newFutureStub(interceptedChannel);
         } catch (Exception e) {
             // close the channel if connect() throws exception, avoid leakage
             try {
@@ -219,6 +231,7 @@ public class MilvusServiceClient extends AbstractMilvusGrpcClient {
         this.logLevel = src.logLevel;
         this.retryParam = src.retryParam;
         this.currentDatabaseName = src.currentDatabaseName;
+        this.endpoint = src.endpoint;
     }
 
     @Override
@@ -243,6 +256,11 @@ public class MilvusServiceClient extends AbstractMilvusGrpcClient {
     @Override
     protected String currentDbName() {
         return currentDatabaseName;
+    }
+
+    @Override
+    protected String currentEndpoint() {
+        return endpoint;
     }
 
     @Override
@@ -434,13 +452,16 @@ public class MilvusServiceClient extends AbstractMilvusGrpcClient {
      */
     private R<ConnectResponse> connect(ConnectParam connectParam) {
         ExceptionUtils.checkNotNull(connectParam, connectParam.getClass().getSimpleName());
-        ClientInfo info = ClientInfo.newBuilder()
+        ClientInfo.Builder infoBuilder = ClientInfo.newBuilder()
                 .setSdkType("Java")
                 .setSdkVersion(getSDKVersion())
                 .setUser(connectParam.getUserName())
                 .setHost(getHostName())
-                .setLocalTime(getLocalTimeStr())
-                .build();
+                .setLocalTime(getLocalTimeStr());
+        if (connectParam.getOption() != null && !connectParam.getOption().isEmpty()) {
+            infoBuilder.putAllReserved(connectParam.getOption());
+        }
+        ClientInfo info = infoBuilder.build();
         ConnectRequest req = ConnectRequest.newBuilder().setClientInfo(info).build();
         ConnectResponse resp = this.blockingStub.withWaitForReady()
                 .withDeadlineAfter(connectParam.getConnectTimeoutMs(), TimeUnit.MILLISECONDS)
@@ -922,4 +943,3 @@ public class MilvusServiceClient extends AbstractMilvusGrpcClient {
         return retry(() -> super.searchIterator(requestParam));
     }
 }
-

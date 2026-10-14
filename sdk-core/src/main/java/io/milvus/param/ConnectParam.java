@@ -25,11 +25,15 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 import static io.milvus.common.constant.MilvusClientConstant.MilvusConsts.CLOUD_SERVERLESS_URI_REGEX;
 import static io.milvus.common.constant.MilvusClientConstant.MilvusConsts.HOST_HTTPS_PREFIX;
+import static io.milvus.common.utils.RedactCredential.redactCredential;
+import static io.milvus.common.utils.RedactCredential.redactUriUserInfo;
 
 /**
  * Parameters for client connection.
@@ -56,6 +60,7 @@ public class ConnectParam {
     private final String userName;
     private final ThreadLocal<String> clientRequestId;
     private final String proxyAddress;
+    private final Map<String, String> option;
 
     protected ConnectParam(Builder builder) {
         if (builder == null) {
@@ -82,6 +87,7 @@ public class ConnectParam {
         this.userName = builder.userName;
         this.clientRequestId = builder.clientRequestId;
         this.proxyAddress = builder.proxyAddress;
+        this.option = builder.option;
     }
 
     public static Builder newBuilder() {
@@ -172,14 +178,18 @@ public class ConnectParam {
         return proxyAddress;
     }
 
+    public Map<String, String> getOption() {
+        return option;
+    }
+
     @Override
     public String toString() {
         return "ConnectParam{" +
                 "host='" + host + '\'' +
                 ", port=" + port +
                 ", databaseName='" + databaseName + '\'' +
-                ", uri='" + uri + '\'' +
-                ", token='" + token + '\'' +
+                ", uri='" + redactUriUserInfo(uri) + '\'' +
+                ", token='" + redactCredential(token) + '\'' +
                 ", connectTimeoutMs=" + connectTimeoutMs +
                 ", keepAliveTimeMs=" + keepAliveTimeMs +
                 ", keepAliveTimeoutMs=" + keepAliveTimeoutMs +
@@ -187,7 +197,7 @@ public class ConnectParam {
                 ", rpcDeadlineMs=" + rpcDeadlineMs +
                 ", secure=" + secure +
                 ", idleTimeoutMs=" + idleTimeoutMs +
-                ", authorization='" + authorization + '\'' +
+                ", authorization='" + redactCredential(authorization) + '\'' +
                 ", clientKeyPath='" + clientKeyPath + '\'' +
                 ", clientPemPath='" + clientPemPath + '\'' +
                 ", caPemPath='" + caPemPath + '\'' +
@@ -205,13 +215,13 @@ public class ConnectParam {
     public static class Builder {
         private String host = "localhost";
         private int port = 19530;
-        private String databaseName = "default";
+        private String databaseName = "";
         private String uri;
         private String token;
         private long connectTimeoutMs = 10000;
-        private long keepAliveTimeMs = 55000;
-        private long keepAliveTimeoutMs = 20000;
-        private boolean keepAliveWithoutCalls = false;
+        private long keepAliveTimeMs = 10000;
+        private long keepAliveTimeoutMs = 5000;
+        private boolean keepAliveWithoutCalls = true;
         private long rpcDeadlineMs = 0; // Disabling deadline
 
         private String clientKeyPath;
@@ -233,6 +243,7 @@ public class ConnectParam {
         private ThreadLocal<String> clientRequestId;
 
         private String proxyAddress;
+        private Map<String, String> option = new HashMap<>();
 
         protected Builder() {
         }
@@ -321,6 +332,10 @@ public class ConnectParam {
             return proxyAddress;
         }
 
+        public Map<String, String> getOption() {
+            return option;
+        }
+
         /**
          * Sets the host name/address.
          *
@@ -396,7 +411,7 @@ public class ConnectParam {
 
         /**
          * Sets the keep-alive time value of client channel. The keep-alive value must be greater than zero.
-         * Default is 55000 ms.
+         * Default is 10000 ms.
          *
          * @param keepAliveTime keep-alive value
          * @param timeUnit      keep-alive unit
@@ -412,7 +427,7 @@ public class ConnectParam {
 
         /**
          * Sets the keep-alive timeout value of client channel. The timeout value must be greater than zero.
-         * Default value is 20000 ms
+         * Default value is 5000 ms
          *
          * @param keepAliveTimeout timeout value
          * @param timeUnit         timeout unit
@@ -618,6 +633,17 @@ public class ConnectParam {
         }
 
         /**
+         * Sets the option map that will be forwarded to the server via ClientInfo.reserved field.
+         *
+         * @param option a map of key-value pairs
+         * @return <code>Builder</code>
+         */
+        public Builder withOption(Map<String, String> option) {
+            this.option = option;
+            return this;
+        }
+
+        /**
          * Verifies parameters and creates a new {@link ConnectParam} instance.
          *
          * @return {@link ConnectParam}
@@ -635,7 +661,8 @@ public class ConnectParam {
                 this.secure = result.isSecure();
                 this.host = result.getHostname();
                 this.port = result.getPort();
-                this.databaseName = StringUtils.isNotEmpty(result.getDatabase()) ? result.getDatabase() : this.databaseName;
+                this.databaseName = StringUtils.isNotEmpty(result.getDatabase())
+                        ? result.getDatabase() : this.databaseName;
                 if (Pattern.matches(CLOUD_SERVERLESS_URI_REGEX, this.uri)) {
                     this.port = 443;
                 }

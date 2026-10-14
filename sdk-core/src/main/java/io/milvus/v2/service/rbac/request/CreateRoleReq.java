@@ -21,9 +21,11 @@ package io.milvus.v2.service.rbac.request;
 
 public class CreateRoleReq {
     private String roleName;
+    private String description;
 
     private CreateRoleReq(CreateRoleReqBuilder builder) {
         this.roleName = builder.roleName;
+        this.description = builder.description;
     }
 
     public String getRoleName() {
@@ -34,10 +36,19 @@ public class CreateRoleReq {
         this.roleName = roleName;
     }
 
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
     @Override
     public String toString() {
         return "CreateRoleReq{" +
                 "roleName='" + roleName + '\'' +
+                ", description='" + description + '\'' +
                 '}';
     }
 
@@ -47,12 +58,18 @@ public class CreateRoleReq {
 
     public static class CreateRoleReqBuilder {
         private String roleName;
+        private String description = "";
 
         private CreateRoleReqBuilder() {
         }
 
         public CreateRoleReqBuilder roleName(String roleName) {
             this.roleName = roleName;
+            return this;
+        }
+
+        public CreateRoleReqBuilder description(String description) {
+            this.description = description;
             return this;
         }
 

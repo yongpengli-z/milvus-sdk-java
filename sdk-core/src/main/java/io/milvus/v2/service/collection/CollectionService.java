@@ -19,7 +19,7 @@
 
 package io.milvus.v2.service.collection;
 
-import io.milvus.common.utils.GTsDict;
+import io.milvus.common.utils.cache.CollectionTsCache;
 import io.milvus.grpc.*;
 import io.milvus.param.ParamUtils;
 import io.milvus.v2.common.IndexParam;
@@ -30,6 +30,7 @@ import io.milvus.v2.service.collection.request.*;
 import io.milvus.v2.service.collection.response.DescribeCollectionResp;
 import io.milvus.v2.service.collection.response.DescribeReplicasResp;
 import io.milvus.v2.service.collection.response.GetCollectionStatsResp;
+import io.milvus.v2.service.collection.response.GetLoadStateResp;
 import io.milvus.v2.service.collection.response.ListCollectionsResp;
 import io.milvus.v2.service.index.IndexService;
 import io.milvus.v2.service.index.request.CreateIndexReq;
@@ -39,7 +40,10 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public class CollectionService extends BaseService {
     public IndexService indexService = new IndexService();
@@ -89,12 +93,21 @@ public class CollectionService extends BaseService {
                 .setShardsNum(request.getNumShards())
                 .setConsistencyLevelValue(request.getConsistencyLevel().getCode());
 
+        List<KeyValuePair> propertiesList = ParamUtils.AssembleKvPair(request.getProperties());
+        if (CollectionUtils.isNotEmpty(propertiesList)) {
+            propertiesList.forEach(builder::addProperties);
+        }
+        if (request.getNumPartitions() != null) {
+            builder.setNumPartitions(request.getNumPartitions());
+        }
+
         if (StringUtils.isNotEmpty(dbName)) {
             builder.setDbName(dbName);
         }
 
         Status status = blockingStub.createCollection(builder.build());
         rpcUtils.handleResponse(title, status);
+        invalidateSchemaCache(dbName, collectionName);
 
         //create index
         IndexParam indexParam = IndexParam.builder()
@@ -169,6 +182,7 @@ public class CollectionService extends BaseService {
         }
         Status createCollectionResponse = blockingStub.createCollection(builder.build());
         rpcUtils.handleResponse(title, createCollectionResponse);
+        invalidateSchemaCache(dbName, collectionName);
 
         //create index
         if (request.getIndexParams() != null && !request.getIndexParams().isEmpty()) {
@@ -232,9 +246,24 @@ public class CollectionService extends BaseService {
         Status status = blockingStub.dropCollection(builder.build());
         rpcUtils.handleResponse(title, status);
 
-        // remove the last write timestamp for this collection
-        String key = GTsDict.CombineCollectionName(actualDbName(dbName), collectionName);
-        GTsDict.getInstance().removeCollectionTs(key);
+        invalidateSchemaCache(dbName, collectionName);
+        invalidateTsCache(dbName, collectionName);
+        return null;
+    }
+
+    public Void truncateCollection(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, TruncateCollectionReq request) {
+        String dbName = request.getDatabaseName();
+        String collectionName = request.getCollectionName();
+        String title = String.format("Truncate collection: '%s' in database: '%s'", collectionName, dbName);
+        TruncateCollectionRequest.Builder builder = TruncateCollectionRequest.newBuilder()
+                .setCollectionName(collectionName);
+        if (StringUtils.isNotEmpty(dbName)) {
+            builder.setDbName(dbName);
+        }
+        Status status = blockingStub.truncateCollection(builder.build()).getStatus();
+        rpcUtils.handleResponse(title, status);
+
+        invalidateTsCache(dbName, collectionName);
         return null;
     }
 
@@ -262,6 +291,7 @@ public class CollectionService extends BaseService {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
         String title = String.format("Add field to collection: '%s' in database: '%s'", collectionName, dbName);
+
         AddCollectionFieldRequest.Builder builder = AddCollectionFieldRequest.newBuilder()
                 .setCollectionName(collectionName);
         if (StringUtils.isNotEmpty(dbName)) {
@@ -269,11 +299,12 @@ public class CollectionService extends BaseService {
         }
 
         CreateCollectionReq.FieldSchema fieldSchema = SchemaUtils.convertFieldReqToFieldSchema(request);
-        FieldSchema grpcFieldSchema = SchemaUtils.convertToGrpcFieldSchema(fieldSchema);
+        FieldSchema grpcFieldSchema = SchemaUtils.convertToGrpcFieldSchema(fieldSchema, true);
         builder.setSchema(grpcFieldSchema.toByteString());
 
         Status response = blockingStub.addCollectionField(builder.build());
         rpcUtils.handleResponse(title, response);
+        invalidateSchemaCache(dbName, collectionName);
 
         return null;
     }
@@ -295,6 +326,7 @@ public class CollectionService extends BaseService {
 
         Status response = blockingStub.alterCollectionField(builder.build());
         rpcUtils.handleResponse(title, response);
+        invalidateSchemaCache(dbName, collectionName);
 
         return null;
     }
@@ -333,6 +365,7 @@ public class CollectionService extends BaseService {
 
         Status response = blockingStub.alterCollectionField(builder.build());
         rpcUtils.handleResponse(title, response);
+        invalidateSchemaCache(dbName, collectionName);
 
         return null;
     }
@@ -354,9 +387,15 @@ public class CollectionService extends BaseService {
     public DescribeCollectionResp describeCollection(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, DescribeCollectionReq request) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
-        String title = String.format("Describe collection: '%s' in database: '%s'", collectionName, dbName);
-        DescribeCollectionRequest.Builder builder = DescribeCollectionRequest.newBuilder()
-                .setCollectionName(collectionName);
+        Long collectionId = request.getCollectionId();
+        String title = String.format("Describe collection: '%s'(id: %s) in database: '%s'", collectionName, collectionId, dbName);
+        DescribeCollectionRequest.Builder builder = DescribeCollectionRequest.newBuilder();
+        if (StringUtils.isNotEmpty(collectionName)) {
+            builder.setCollectionName(collectionName);
+        }
+        if (collectionId != null) {
+            builder.setCollectionID(collectionId);
+        }
         if (StringUtils.isNotEmpty(dbName)) {
             builder.setDbName(dbName);
         }
@@ -369,9 +408,15 @@ public class CollectionService extends BaseService {
     public List<DescribeCollectionResp> batchDescribeCollections(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, BatchDescribeCollectionReq request) {
         String dbName = request.getDatabaseName();
         List<String> collectionNames = request.getCollectionNames();
-        String title = String.format("Batch describe collections: '%s' in database: '%s'", collectionNames, dbName);
-        BatchDescribeCollectionRequest.Builder builder = BatchDescribeCollectionRequest.newBuilder()
-                .addAllCollectionName(collectionNames);
+        List<Long> collectionIds = request.getCollectionIds();
+        String title = String.format("Batch describe collections: '%s'(ids: %s) in database: '%s'", collectionNames, collectionIds, dbName);
+        BatchDescribeCollectionRequest.Builder builder = BatchDescribeCollectionRequest.newBuilder();
+        if (CollectionUtils.isNotEmpty(collectionNames)) {
+            builder.addAllCollectionName(collectionNames);
+        }
+        if (CollectionUtils.isNotEmpty(collectionIds)) {
+            builder.addAllCollectionID(collectionIds);
+        }
         if (StringUtils.isNotEmpty(dbName)) {
             builder.setDbName(dbName);
         }
@@ -385,6 +430,7 @@ public class CollectionService extends BaseService {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
         String newName = request.getNewCollectionName();
+        String targetDbName = request.getTargetDbName();
         String title = String.format("Rename collection: '%s' to '%s' in database: '%s'", collectionName, newName, dbName);
         RenameCollectionRequest.Builder builder = RenameCollectionRequest.newBuilder()
                 .setOldName(collectionName)
@@ -392,8 +438,18 @@ public class CollectionService extends BaseService {
         if (StringUtils.isNotEmpty(dbName)) {
             builder.setDbName(dbName);
         }
+        if (StringUtils.isNotEmpty(targetDbName)) {
+            builder.setNewDBName(targetDbName);
+        }
         Status status = blockingStub.renameCollection(builder.build());
         rpcUtils.handleResponse(title, status);
+
+        String sourceDb = actualDbName(dbName);
+        String targetDb = StringUtils.isNotEmpty(targetDbName) ? targetDbName : sourceDb;
+        invalidateSchemaCache(sourceDb, collectionName);
+        invalidateSchemaCache(targetDb, newName);
+        CollectionTsCache.getInstance().move(
+                getEndpoint(), sourceDb, collectionName, targetDb, newName);
 
         return null;
     }
@@ -401,21 +457,32 @@ public class CollectionService extends BaseService {
     public Void loadCollection(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, LoadCollectionReq request) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
+        boolean sync = Boolean.TRUE.equals(request.getSync());
+        boolean refresh = Boolean.TRUE.equals(request.getRefresh());
+        boolean skipLoadDynamicField = Boolean.TRUE.equals(request.getSkipLoadDynamicField());
         String title = String.format("Load collection: '%s' in database: '%s'", collectionName, dbName);
         LoadCollectionRequest.Builder builder = LoadCollectionRequest.newBuilder()
                 .setCollectionName(collectionName)
                 .setReplicaNumber(request.getNumReplicas())
-                .setRefresh(request.getRefresh())
+                .setRefresh(refresh)
                 .addAllLoadFields(request.getLoadFields())
-                .setSkipLoadDynamicField(request.getSkipLoadDynamicField())
+                .setSkipLoadDynamicField(skipLoadDynamicField)
                 .addAllResourceGroups(request.getResourceGroups());
         if (StringUtils.isNotEmpty(dbName)) {
             builder.setDbName(dbName);
         }
-        Status status = blockingStub.loadCollection(builder.build());
+        if (StringUtils.isNotEmpty(request.getPriority())) {
+            // normalize to lowercase: the proxy only maps the exact lowercase "low" to LOW priority
+            builder.putLoadParams("load_priority", request.getPriority().toLowerCase());
+        }
+        MilvusServiceGrpc.MilvusServiceBlockingStub tempBlockingStub = blockingStub;
+        if (request.getTimeout() != null && request.getTimeout() > 0) {
+            tempBlockingStub = tempBlockingStub.withDeadlineAfter(request.getTimeout(), TimeUnit.MILLISECONDS);
+        }
+        Status status = tempBlockingStub.loadCollection(builder.build());
         rpcUtils.handleResponse(title, status);
-        if (request.getSync()) {
-            WaitForLoadCollection(blockingStub, dbName, collectionName, request.getTimeout());
+        if (sync) {
+            waitForLoadCollection(blockingStub, dbName, collectionName, request.getTimeout(), refresh);
         }
 
         return null;
@@ -424,6 +491,7 @@ public class CollectionService extends BaseService {
     public Void refreshLoad(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, RefreshLoadReq request) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
+        boolean sync = Boolean.TRUE.equals(request.getSync());
         String title = String.format("Refresh load collection: '%s' in database: '%s'", collectionName, dbName);
         LoadCollectionRequest.Builder builder = LoadCollectionRequest.newBuilder()
                 .setCollectionName(collectionName)
@@ -431,10 +499,14 @@ public class CollectionService extends BaseService {
         if (StringUtils.isNotEmpty(dbName)) {
             builder.setDbName(dbName);
         }
-        Status status = blockingStub.loadCollection(builder.build());
+        MilvusServiceGrpc.MilvusServiceBlockingStub tempBlockingStub = blockingStub;
+        if (request.getTimeout() != null && request.getTimeout() > 0) {
+            tempBlockingStub = tempBlockingStub.withDeadlineAfter(request.getTimeout(), TimeUnit.MILLISECONDS);
+        }
+        Status status = tempBlockingStub.loadCollection(builder.build());
         rpcUtils.handleResponse(title, status);
-        if (request.getSync()) {
-            WaitForLoadCollection(blockingStub, dbName, collectionName, request.getTimeout());
+        if (sync) {
+            waitForLoadCollection(blockingStub, dbName, collectionName, request.getTimeout(), true);
         }
 
         return null;
@@ -456,6 +528,22 @@ public class CollectionService extends BaseService {
     }
 
     public Boolean getLoadState(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, GetLoadStateReq request) {
+        return getLoadStateResponse(blockingStub, request).getState() == LoadState.LoadStateLoaded;
+    }
+
+    public GetLoadStateResp getLoadStateV2(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, GetLoadStateReq request) {
+        GetLoadStateResponse response = getLoadStateResponse(blockingStub, request);
+        GetLoadStateResp.GetLoadStateRespBuilder respBuilder = GetLoadStateResp.builder()
+                .state(response.getState());
+        if (response.getState() == LoadState.LoadStateLoading) {
+            respBuilder.progress(getLoadingProgress(blockingStub, request, false, null));
+        }
+
+        return respBuilder.build();
+    }
+
+    private GetLoadStateResponse getLoadStateResponse(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
+                                                      GetLoadStateReq request) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
         String partitionName = request.getPartitionName();
@@ -478,7 +566,39 @@ public class CollectionService extends BaseService {
             }
             throw new MilvusClientException(ErrorCode.SERVER_ERROR, msg);
         }
-        return response.getState() == LoadState.LoadStateLoaded;
+        return response;
+    }
+
+    private Long getLoadingProgress(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
+                                    GetLoadStateReq request,
+                                    boolean refreshLoad,
+                                    Long timeoutMs) {
+        GetLoadingProgressResponse response = getLoadingProgressInternal(blockingStub, request, timeoutMs);
+        return refreshLoad ? response.getRefreshProgress() : response.getProgress();
+    }
+
+    private GetLoadingProgressResponse getLoadingProgressInternal(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
+                                                                  GetLoadStateReq request,
+                                                                  Long timeoutMs) {
+        String dbName = request.getDatabaseName();
+        String collectionName = request.getCollectionName();
+        String partitionName = request.getPartitionName();
+        GetLoadingProgressRequest.Builder builder = GetLoadingProgressRequest.newBuilder()
+                .setCollectionName(collectionName);
+        if (StringUtils.isNotEmpty(dbName)) {
+            builder.setDbName(dbName);
+        }
+        if (StringUtils.isNotEmpty(partitionName)) {
+            builder.addPartitionNames(partitionName);
+        }
+        MilvusServiceGrpc.MilvusServiceBlockingStub tempBlockingStub = blockingStub;
+        if (timeoutMs != null && timeoutMs > 0) {
+            tempBlockingStub = tempBlockingStub.withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+        }
+        GetLoadingProgressResponse response = tempBlockingStub.getLoadingProgress(builder.build());
+        String title = String.format("Get loading progress of collection: '%s' in database: '%s'", collectionName, dbName);
+        rpcUtils.handleResponse(title, response.getStatus());
+        return response;
     }
 
     public GetCollectionStatsResp getCollectionStats(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, GetCollectionStatsReq request) {
@@ -493,8 +613,11 @@ public class CollectionService extends BaseService {
         GetCollectionStatisticsResponse response = blockingStub.getCollectionStatistics(builder.build());
 
         rpcUtils.handleResponse(title, response.getStatus());
+        Map<String, String> stats = new HashMap<>();
+        response.getStatsList().forEach(stat -> stats.put(stat.getKey(), stat.getValue()));
         GetCollectionStatsResp getCollectionStatsResp = GetCollectionStatsResp.builder()
                 .numOfEntities(response.getStatsList().stream().filter(stat -> stat.getKey().equals("row_count")).map(stat -> Long.parseLong(stat.getValue())).findFirst().get())
+                .stats(stats)
                 .build();
         return getCollectionStatsResp;
     }
@@ -570,6 +693,7 @@ public class CollectionService extends BaseService {
         }
         Status status = blockingStub.addCollectionFunction(builder.build());
         rpcUtils.handleResponse(title, status);
+        invalidateSchemaCache(dbName, collectionName);
 
         return null;
     }
@@ -592,6 +716,7 @@ public class CollectionService extends BaseService {
         }
         Status status = blockingStub.alterCollectionFunction(builder.build());
         rpcUtils.handleResponse(title, status);
+        invalidateSchemaCache(dbName, collectionName);
 
         return null;
     }
@@ -613,36 +738,35 @@ public class CollectionService extends BaseService {
         }
         Status status = blockingStub.dropCollectionFunction(builder.build());
         rpcUtils.handleResponse(title, status);
+        invalidateSchemaCache(dbName, collectionName);
 
         return null;
     }
 
-    private void WaitForLoadCollection(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, String databaseName,
-                                       String collectionName, long timeoutMs) {
-        long startTime = System.currentTimeMillis(); // Capture start time/ Timeout in milliseconds (60 seconds)
+    private void waitForLoadCollection(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, String databaseName,
+                                       String collectionName, Long timeoutMs, boolean refreshLoad) {
+        long startTime = System.currentTimeMillis();
+        GetLoadStateReq request = GetLoadStateReq.builder()
+                .databaseName(databaseName)
+                .collectionName(collectionName)
+                .build();
 
         while (true) {
-            // Call the getLoadState method
-            boolean isLoaded = getLoadState(blockingStub, GetLoadStateReq.builder()
-                    .databaseName(databaseName)
-                    .collectionName(collectionName)
-                    .build());
-            if (isLoaded) {
+            if (getLoadingProgress(blockingStub, request, refreshLoad, timeoutMs) >= 100L) {
                 return;
             }
 
-            // Check if timeout is exceeded
-            if (System.currentTimeMillis() - startTime > timeoutMs) {
+            if (timeoutMs != null && timeoutMs > 0 && System.currentTimeMillis() - startTime > timeoutMs) {
                 throw new MilvusClientException(ErrorCode.SERVER_ERROR, "Load collection timeout");
             }
-            // Wait for a certain period before checking again
             try {
-                Thread.sleep(500); // Sleep for 0.5 second. Adjust this value as needed.
+                Thread.sleep(500);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 logger.error("Thread was interrupted, Failed to complete operation");
-                return; // or handle interruption appropriately
+                return;
             }
         }
     }
+
 }

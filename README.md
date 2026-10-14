@@ -22,7 +22,7 @@ The following table shows compatibilities between Milvus and Java SDK.
 |     2.3.x      |      2.3.11      |
 |     2.4.x      |      2.4.11      |
 |     2.5.x      |      2.5.15      |
-|     2.6.x      |      2.6.13      |
+|     2.6.x      |      2.6.25      |
 
 ### Install Java SDK
 
@@ -34,20 +34,20 @@ You can use **Apache Maven** or **Gradle** add Milvus SDK to your project.
         <dependency>
             <groupId>io.milvus</groupId>
             <artifactId>milvus-sdk-java</artifactId>
-            <version>2.6.13</version>
+            <version>2.6.25</version>
         </dependency>
        ```
 
    - Gradle/Groovy
 
         ```groovy
-        implementation 'io.milvus:milvus-sdk-java:2.6.13'
+        implementation 'io.milvus:milvus-sdk-java:2.6.25'
         ```
 
    - Gradle/Kotlin
 
         ```kotlin
-        implementation("io.milvus:milvus-sdk-java:2.6.13")
+        implementation("io.milvus:milvus-sdk-java:2.6.25")
         ```
   
 From v2.5.2, milvus Java SDK is split into two packages: milvus-sdk-java and milvus-sdk-java-bulkwriter, because BulkWriter requires quite a lot of dependencies. If you don't need BulkWriter tool, you can ignore the milvus-sdk-java-bulkwriter package.
@@ -59,29 +59,25 @@ To use BulkWriter, import milvus-sdk-java-bulkwriter to your project.
      <dependency>
          <groupId>io.milvus</groupId>
          <artifactId>milvus-sdk-java-bulkwriter</artifactId>
-         <version>2.6.13</version>
+         <version>2.6.25</version>
      </dependency>
     ```
 
    - Gradle/Groovy
 
      ```groovy
-     implementation 'io.milvus:milvus-sdk-java-bulkwriter:2.6.13'
+     implementation 'io.milvus:milvus-sdk-java-bulkwriter:2.6.25'
      ```
 
    - Gradle/Kotlin
 
      ```kotlin
-     implementation("io.milvus:milvus-sdk-java-bulkwriter:2.6.13")
+     implementation("io.milvus:milvus-sdk-java-bulkwriter:2.6.25")
      ```     
 
 ### Examples
 
 Please refer to [examples](https://github.com/milvus-io/milvus-sdk-java/tree/master/examples) folder for Java SDK examples.
-
-### Documentation
-
-
 
 ### Troubleshooting
 
@@ -99,19 +95,19 @@ Please refer to [examples](https://github.com/milvus-io/milvus-sdk-java/tree/mas
          <dependency>
              <groupId>org.slf4j</groupId>
              <artifactId>slf4j-api</artifactId>
-             <version>1.7.30</version>
+             <version>1.7.36</version>
          </dependency>
         ```
     
     - Gradle/Groovy
     
          ```groovy
-         compile group: 'org.slf4j', name: 'slf4j-api', version: '1.7.30'
+         implementation 'org.slf4j:slf4j-api:1.7.36'
          ```
     - Gradle/Kotlin
     
         ```kotlin
-        implementation("org.slf4j:slf4j-api:1.7.30")
+        implementation("org.slf4j:slf4j-api:1.7.36")
         ```
 
 ### Development

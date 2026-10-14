@@ -50,9 +50,20 @@ public class SchemaUtils {
     }
 
     public static FieldSchema convertToGrpcFieldSchema(CreateCollectionReq.FieldSchema fieldSchema) {
+        return convertToGrpcFieldSchema(fieldSchema, false);
+    }
+
+    public static FieldSchema convertToGrpcFieldSchema(CreateCollectionReq.FieldSchema fieldSchema, boolean forAddField) {
         checkNullEmptyString(fieldSchema.getName(), "Field name");
 
         DataType dType = DataType.valueOf(fieldSchema.getDataType().name());
+        boolean isNullable = Boolean.TRUE.equals(fieldSchema.getIsNullable());
+
+        // Vector field must be nullable when adding to existing collection
+        if (forAddField && ParamUtils.isVectorDataType(dType) && !isNullable) {
+            throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                    "Vector field must be nullable when adding to existing collection, field name: " + fieldSchema.getName());
+        }
         FieldSchema.Builder builder = FieldSchema.newBuilder()
                 .setName(fieldSchema.getName())
                 .setDescription(fieldSchema.getDescription())
@@ -61,7 +72,7 @@ public class SchemaUtils {
                 .setIsPartitionKey(fieldSchema.getIsPartitionKey())
                 .setIsClusteringKey(fieldSchema.getIsClusteringKey())
                 .setAutoID(fieldSchema.getAutoID())
-                .setNullable(fieldSchema.getIsNullable());
+                .setNullable(isNullable);
         if (!ParamUtils.isVectorDataType(dType) && !fieldSchema.getIsPrimaryKey()) {
             ValueField value = ParamUtils.objectToValueField(fieldSchema.getDefaultValue(), dType);
             if (value != null) {
@@ -222,6 +233,10 @@ public class SchemaUtils {
                 .isNullable(fieldSchema.getNullable())
                 .defaultValue(ParamUtils.valueFieldToObject(fieldSchema.getDefaultValue(), fieldSchema.getDataType()))
                 .build();
+        // server-assigned/derived attributes, populated only by describe_collection
+        schema.setFieldId(fieldSchema.getFieldID());
+        schema.setIsDynamic(fieldSchema.getIsDynamic());
+        schema.setIsFunctionOutput(fieldSchema.getIsFunctionOutput());
 
         Map<String, String> typeParams = new HashMap<>();
         for (KeyValuePair keyValuePair : fieldSchema.getTypeParamsList()) {
@@ -292,7 +307,12 @@ public class SchemaUtils {
                 .outputFieldNames(functionSchema.getOutputFieldNamesList().stream().collect(Collectors.toList()));
         List<KeyValuePair> pairs = functionSchema.getParamsList();
         pairs.forEach((kv) -> builder.param(kv.getKey(), kv.getValue()));
-        return builder.build();
+        CreateCollectionReq.Function function = builder.build();
+        // server-assigned/derived attributes, populated only by describe_collection
+        function.setId(functionSchema.getId());
+        function.setInputFieldIds(functionSchema.getInputFieldIdsList().stream().collect(Collectors.toList()));
+        function.setOutputFieldIds(functionSchema.getOutputFieldIdsList().stream().collect(Collectors.toList()));
+        return function;
     }
 
     public static CreateCollectionReq.FieldSchema convertFieldReqToFieldSchema(AddFieldReq addFieldReq) {

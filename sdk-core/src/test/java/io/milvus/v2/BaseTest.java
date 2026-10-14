@@ -30,9 +30,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import com.google.common.util.concurrent.Futures;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.concurrent.TimeUnit;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -42,10 +47,16 @@ public class BaseTest {
     public MilvusClientV2 client_v2 = new MilvusClientV2(null);
     @Mock
     protected MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub;
+    @Mock
+    protected MilvusServiceGrpc.MilvusServiceFutureStub futureStub;
 
     @BeforeEach
     public void setUp() {
         client_v2.setBlockingStub(blockingStub);
+        client_v2.setFutureStub(futureStub);
+        when(blockingStub.withDeadlineAfter(anyLong(), eq(TimeUnit.MILLISECONDS))).thenReturn(blockingStub);
+        when(futureStub.withDeadlineAfter(anyLong(), eq(TimeUnit.MILLISECONDS))).thenReturn(futureStub);
+        when(futureStub.withOption(any(), any())).thenReturn(futureStub);
 
         Status successStatus = Status.newBuilder().setCode(0).build();
         BoolResponse trueResponse = BoolResponse.newBuilder().setStatus(successStatus).setValue(Boolean.TRUE).build();
@@ -111,8 +122,14 @@ public class BaseTest {
         when(blockingStub.releaseCollection(any())).thenReturn(successStatus);
         when(blockingStub.getLoadState(any())).thenReturn(GetLoadStateResponse.newBuilder().setState(LoadState.LoadStateLoaded).setStatus(successStatus).build());
         when(blockingStub.dropCollection(any())).thenReturn(successStatus);
+        when(blockingStub.truncateCollection(any())).thenReturn(TruncateCollectionResponse.newBuilder().setStatus(successStatus).build());
         when(blockingStub.hasCollection(any())).thenReturn(trueResponse);
         when(blockingStub.describeCollection(any())).thenReturn(describeCollectionResponse);
+        when(futureStub.describeCollection(any())).thenReturn(Futures.immediateFuture(describeCollectionResponse));
+        when(blockingStub.batchDescribeCollection(any())).thenReturn(BatchDescribeCollectionResponse.newBuilder()
+                .setStatus(successStatus)
+                .addResponses(describeCollectionResponse)
+                .build());
         when(blockingStub.renameCollection(any())).thenReturn(successStatus);
         when(blockingStub.getCollectionStatistics(any())).thenReturn(GetCollectionStatisticsResponse.newBuilder().addStats(KeyValuePair.newBuilder().setKey("row_count").setValue("10").build()).setStatus(successStatus).build());
         when(blockingStub.getLoadingProgress(any())).thenReturn(GetLoadingProgressResponse.newBuilder().setStatus(successStatus).setProgress(100).build());
@@ -126,24 +143,39 @@ public class BaseTest {
         when(blockingStub.insert(any())).thenReturn(MutationResult.newBuilder().setInsertCnt(2L).build());
         when(blockingStub.upsert(any())).thenReturn(MutationResult.newBuilder().setUpsertCnt(2L).build());
         when(blockingStub.query(any())).thenReturn(QueryResults.newBuilder().build());
+        when(futureStub.query(any())).thenReturn(Futures.immediateFuture(QueryResults.newBuilder().build()));
         when(blockingStub.delete(any())).thenReturn(MutationResult.newBuilder().setDeleteCnt(2L).build());
         SearchResults searchResults = SearchResults.newBuilder()
+                .setStatus(Status.newBuilder().setCode(0)
+                        .putExtraInfo("report_value", "123")
+                        .putExtraInfo("scanned_remote_bytes", "456")
+                        .putExtraInfo("scanned_total_bytes", "789")
+                        .putExtraInfo("cache_hit_ratio", "0.5")
+                        .build())
                 .setResults(SearchResultData.newBuilder().addScores(1L).addTopks(0L).build())
                 .build();
         when(blockingStub.search(any())).thenReturn(searchResults);
+        when(futureStub.search(any())).thenReturn(Futures.immediateFuture(searchResults));
+        when(blockingStub.hybridSearch(any())).thenReturn(searchResults);
+        when(futureStub.hybridSearch(any())).thenReturn(Futures.immediateFuture(searchResults));
 
         // partition api
         when(blockingStub.createPartition(any())).thenReturn(successStatus);
         when(blockingStub.dropPartition(any())).thenReturn(successStatus);
         when(blockingStub.hasPartition(any())).thenReturn(trueResponse);
         when(blockingStub.showPartitions(any())).thenReturn(ShowPartitionsResponse.newBuilder().setStatus(successStatus).addPartitionNames("test").build());
+        when(blockingStub.getPartitionStatistics(any())).thenReturn(GetPartitionStatisticsResponse.newBuilder()
+                .setStatus(successStatus)
+                .addStats(KeyValuePair.newBuilder().setKey("row_count").setValue("10").build())
+                .build());
         when(blockingStub.loadPartitions(any())).thenReturn(successStatus);
         when(blockingStub.releasePartitions(any())).thenReturn(successStatus);
 
         // role api
         when(blockingStub.createRole(any())).thenReturn(successStatus);
+        when(blockingStub.alterRole(any())).thenReturn(successStatus);
         when(blockingStub.dropRole(any())).thenReturn(successStatus);
-        when(blockingStub.selectRole(any())).thenReturn(SelectRoleResponse.newBuilder().setStatus(successStatus).addResults(RoleResult.newBuilder().setRole(RoleEntity.newBuilder().setName("role_test").build()).build()).build());
+        when(blockingStub.selectRole(any())).thenReturn(SelectRoleResponse.newBuilder().setStatus(successStatus).addResults(RoleResult.newBuilder().setRole(RoleEntity.newBuilder().setName("role_test").setDescription("role description").build()).build()).build());
         when(blockingStub.selectGrant(any())).thenReturn(SelectGrantResponse.newBuilder().setStatus(successStatus).addEntities(GrantEntity.newBuilder().setDbName("test").setObjectName("test").setObject(ObjectEntity.newBuilder().setName("test").build()).build()).build());
 
         when(blockingStub.operatePrivilege(any())).thenReturn(successStatus);
@@ -154,16 +186,121 @@ public class BaseTest {
         when(blockingStub.createCredential(any())).thenReturn(successStatus);
         when(blockingStub.updateCredential(any())).thenReturn(successStatus);
         when(blockingStub.deleteCredential(any())).thenReturn(successStatus);
-        when(blockingStub.selectUser(any())).thenReturn(SelectUserResponse.newBuilder().setStatus(successStatus).addResults(UserResult.newBuilder().setUser(UserEntity.newBuilder().setName("user_test").build()).build()).build());
+        when(blockingStub.selectUser(any())).thenReturn(SelectUserResponse.newBuilder().setStatus(successStatus).addResults(UserResult.newBuilder().setUser(UserEntity.newBuilder().setName("user_test").build()).setDescription("user description").build()).build());
 
         // utility api
         when(blockingStub.flush(any())).thenReturn(FlushResponse.newBuilder().setStatus(successStatus).build());
+        when(blockingStub.getPersistentSegmentInfo(any())).thenReturn(GetPersistentSegmentInfoResponse.newBuilder()
+                .setStatus(successStatus)
+                .addInfos(PersistentSegmentInfo.newBuilder()
+                        .setSegmentID(1L)
+                        .setCollectionID(2L)
+                        .setPartitionID(3L)
+                        .setNumRows(4L)
+                        .setState(SegmentState.Flushed)
+                        .setLevel(SegmentLevel.L1)
+                        .setStorageVersion(5L)
+                        .setIsSorted(true)
+                        .build())
+                .build());
+        when(blockingStub.getQuerySegmentInfo(any())).thenReturn(GetQuerySegmentInfoResponse.newBuilder()
+                .setStatus(successStatus)
+                .addInfos(QuerySegmentInfo.newBuilder()
+                        .setSegmentID(6L)
+                        .setCollectionID(7L)
+                        .setPartitionID(8L)
+                        .setMemSize(9L)
+                        .setNumRows(10L)
+                        .setIndexName("test_index")
+                        .setIndexID(11L)
+                        .setState(SegmentState.Sealed)
+                        .setLevel(SegmentLevel.L1)
+                        .addNodeIds(12L)
+                        .setStorageVersion(13L)
+                        .setIsSorted(true)
+                        .build())
+                .build());
         when(blockingStub.createAlias(any())).thenReturn(successStatus);
         when(blockingStub.dropAlias(any())).thenReturn(successStatus);
         when(blockingStub.alterAlias(any())).thenReturn(successStatus);
         when(blockingStub.describeAlias(any())).thenReturn(DescribeAliasResponse.newBuilder().setStatus(successStatus).build());
         when(blockingStub.listAliases(any())).thenReturn(ListAliasesResponse.newBuilder().setStatus(successStatus).addAliases("test").build());
+        when(blockingStub.manualCompaction(any())).thenReturn(ManualCompactionResponse.newBuilder().setStatus(successStatus).setCompactionID(1L).build());
         when(blockingStub.allocTimestamp(any())).thenReturn(AllocTimestampResponse.newBuilder().setStatus(successStatus).setTimestamp(1L).build());
+
+        // cdc api
+        ReplicateConfiguration replicateConfiguration = ReplicateConfiguration.newBuilder()
+                .addClusters(MilvusCluster.newBuilder()
+                        .setClusterId("source_cluster")
+                        .setConnectionParam(ConnectionParam.newBuilder()
+                                .setUri("http://source.example.com:19530")
+                                .setToken("source-token")
+                                .build())
+                        .addPchannels("by-dev-rootcoord-dml_0")
+                        .build())
+                .addClusters(MilvusCluster.newBuilder()
+                        .setClusterId("target_cluster")
+                        .setConnectionParam(ConnectionParam.newBuilder()
+                                .setUri("http://target.example.com:19530")
+                                .setToken("target-token")
+                                .build())
+                        .addPchannels("by-dev-rootcoord-dml_1")
+                        .build())
+                .addCrossClusterTopology(CrossClusterTopology.newBuilder()
+                        .setSourceClusterId("source_cluster")
+                        .setTargetClusterId("target_cluster")
+                        .build())
+                .build();
+        ReplicateCheckpoint replicateCheckpoint = ReplicateCheckpoint.newBuilder()
+                .setClusterId("source_cluster")
+                .setPchannel("by-dev-rootcoord-dml_0")
+                .setMessageId(MessageID.newBuilder()
+                        .setId("message-id-1")
+                        .setWALName(WALName.RocksMQ)
+                        .build())
+                .setTimeTick(1000L)
+                .build();
+        ReplicateCheckpoint salvageReplicateCheckpoint = ReplicateCheckpoint.newBuilder()
+                .setClusterId("source_cluster")
+                .setPchannel("by-dev-rootcoord-dml_0")
+                .setMessageId(MessageID.newBuilder()
+                        .setId("message-id-2")
+                        .setWALName(WALName.Kafka)
+                        .build())
+                .setTimeTick(2000L)
+                .build();
+        when(blockingStub.getReplicateInfo(any())).thenReturn(
+                GetReplicateInfoResponse.newBuilder()
+                        .setCheckpoint(replicateCheckpoint)
+                        .setSalvageCheckpoint(salvageReplicateCheckpoint)
+                        .build());
+        when(blockingStub.getReplicateConfiguration(any())).thenReturn(
+                GetReplicateConfigurationResponse.newBuilder()
+                        .setStatus(successStatus)
+                        .setConfiguration(replicateConfiguration)
+                        .build());
+        when(blockingStub.updateReplicateConfiguration(any())).thenReturn(successStatus);
+        when(blockingStub.dumpMessages(any())).thenReturn(Arrays.asList(
+                DumpMessagesResponse.newBuilder()
+                        .setMessage(ImmutableMessage.newBuilder()
+                                .setId(MessageID.newBuilder()
+                                        .setId("message-id-2")
+                                        .setWALName(WALName.Kafka)
+                                        .build())
+                                .setPayload(com.google.protobuf.ByteString.copyFromUtf8("payload-1"))
+                                .putProperties("source", "primary")
+                                .build())
+                        .build(),
+                DumpMessagesResponse.newBuilder()
+                        .setMessage(ImmutableMessage.newBuilder()
+                                .setId(MessageID.newBuilder()
+                                        .setId("message-id-3")
+                                        .setWALName(WALName.Pulsar)
+                                        .build())
+                                .setPayload(com.google.protobuf.ByteString.copyFromUtf8("payload-2"))
+                                .putProperties("source", "secondary")
+                                .build())
+                        .build()).iterator());
     }
 
     @AfterEach

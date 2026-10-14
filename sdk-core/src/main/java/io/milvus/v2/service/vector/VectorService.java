@@ -19,14 +19,19 @@
 
 package io.milvus.v2.service.vector;
 
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.protobuf.ByteString;
-import io.milvus.common.utils.GTsDict;
 import io.milvus.common.utils.JsonUtils;
+import io.milvus.common.utils.cache.SchemaCache;
 import io.milvus.grpc.*;
 import io.milvus.orm.iterator.QueryIterator;
 import io.milvus.orm.iterator.RpcStubWrapper;
 import io.milvus.orm.iterator.SearchIterator;
 import io.milvus.orm.iterator.SearchIteratorV2;
+import io.milvus.v2.exception.DataNotMatchException;
 import io.milvus.v2.exception.ErrorCode;
 import io.milvus.v2.exception.MilvusClientException;
 import io.milvus.v2.service.BaseService;
@@ -35,18 +40,22 @@ import io.milvus.v2.service.collection.response.DescribeCollectionResp;
 import io.milvus.v2.service.vector.request.*;
 import io.milvus.v2.service.vector.response.*;
 import io.milvus.v2.utils.DataUtils;
+import io.milvus.v2.utils.RpcUtils;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 public class VectorService extends BaseService {
     Logger logger = LoggerFactory.getLogger(VectorService.class);
-    private ConcurrentHashMap<String, DescribeCollectionResponse> cacheCollectionInfo = new ConcurrentHashMap<>();
 
     private DescribeCollectionResponse describeCollection(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
                                                           String dbName, String collectionName) {
@@ -62,42 +71,40 @@ public class VectorService extends BaseService {
     }
 
     /**
-     * This method is for insert/upsert requests to reduce the rpc call of describeCollection()
-     * Always try to get the collection info from cache.
-     * If the cache doesn't have the collection info, call describeCollection() and cache it.
-     * If insert/upsert get server error, remove the cached collection info.
+     * Returns the cached collection schema when available, loading and caching it otherwise.
+     * Insert/upsert callers may force a refresh when request construction indicates that the
+     * cached schema is stale, and invalidate it when the server returns SchemaMismatch. Other
+     * server errors preserve the cached schema.
      */
     private DescribeCollectionResponse getCollectionInfo(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
                                                          String databaseName, String collectionName, boolean forceUpdate) {
-        String key = GTsDict.CombineCollectionName(actualDbName(databaseName), collectionName);
-        DescribeCollectionResponse info = cacheCollectionInfo.get(key);
-        if (info == null || forceUpdate) {
-            info = describeCollection(blockingStub, databaseName, collectionName);
-            cacheCollectionInfo.put(key, info);
+        String dbName = actualDbName(databaseName);
+        return SchemaCache.getInstance().getOrLoad(getEndpoint(), dbName, collectionName, forceUpdate, this,
+                () -> describeCollection(blockingStub, dbName, collectionName));
+    }
+
+    private CompletableFuture<DescribeCollectionResponse> describeCollection(
+            MilvusServiceGrpc.MilvusServiceFutureStub futureStub,
+            String dbName, String collectionName) {
+        String title = String.format("Describe collection '%s' in database: '%s'", collectionName, dbName);
+        DescribeCollectionRequest.Builder builder = DescribeCollectionRequest.newBuilder()
+                .setCollectionName(collectionName);
+        if (StringUtils.isNotEmpty(dbName)) {
+            builder.setDbName(dbName);
         }
-
-        return info;
+        return transformFuture(futureStub.describeCollection(builder.build()), response -> {
+            rpcUtils.handleResponse(title, response.getStatus());
+            return response;
+        });
     }
 
-    public void cleanCollectionCache() {
-        cacheCollectionInfo.clear();
-    }
-
-    /**
-     * insert/upsert return an error, but is not a RateLimit error,
-     * clean the cache so that the next insert will call describeCollection() to get the latest info.
-     */
-    private void cleanCacheIfFailed(Status status, String databaseName, String collectionName) {
-        if ((status.getCode() != 0 && status.getCode() != 8) ||
-                (!status.getErrorCode().equals(io.milvus.grpc.ErrorCode.Success) &&
-                        status.getErrorCode() != io.milvus.grpc.ErrorCode.RateLimit)) {
-            removeCollectionCache(databaseName, collectionName);
-        }
-    }
-
-    public void removeCollectionCache(String databaseName, String collectionName) {
-        String key = GTsDict.CombineCollectionName(actualDbName(databaseName), collectionName);
-        cacheCollectionInfo.remove(key);
+    private CompletableFuture<DescribeCollectionResponse> getCollectionInfoAsync(
+            MilvusServiceGrpc.MilvusServiceFutureStub futureStub,
+            String databaseName, String collectionName, boolean forceUpdate) {
+        String dbName = actualDbName(databaseName);
+        return SchemaCache.getInstance().getOrLoadAsync(
+                getEndpoint(), dbName, collectionName, forceUpdate, this,
+                () -> describeCollection(futureStub, dbName, collectionName));
     }
 
     private InsertRequest buildInsertRequest(InsertReq request, DescribeCollectionResponse descResp) {
@@ -108,9 +115,22 @@ public class VectorService extends BaseService {
     }
 
     public InsertResp insert(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, InsertReq request) {
+        return insert(blockingStub, request, true);
+    }
+
+    private InsertResp insert(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, InsertReq request,
+                              boolean allowRetry) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
         String title = String.format("Insert to collection: '%s' in database: '%s'", collectionName, dbName);
+
+        // PyMilvus returns an empty result without issuing the RPC when the data is empty.
+        if (CollectionUtils.isEmpty(request.getData())) {
+            return InsertResp.builder()
+                    .InsertCnt(0)
+                    .primaryKeys(Collections.emptyList())
+                    .build();
+        }
 
         DescribeCollectionResponse descResp = getCollectionInfo(blockingStub, dbName, collectionName, false);
 
@@ -121,7 +141,7 @@ public class VectorService extends BaseService {
         InsertRequest rpcRequest;
         try {
             rpcRequest = buildInsertRequest(request, descResp);
-        } catch (Exception ignored) {
+        } catch (DataNotMatchException ignored) {
             descResp = getCollectionInfo(blockingStub, dbName, collectionName, true);
             rpcRequest = buildInsertRequest(request, descResp);
         }
@@ -132,17 +152,16 @@ public class VectorService extends BaseService {
         // call insert() again.
         MutationResult response = blockingStub.insert(rpcRequest);
         if (response.getStatus().getErrorCode() == io.milvus.grpc.ErrorCode.SchemaMismatch) {
-            getCollectionInfo(blockingStub, dbName, collectionName, true);
-            return this.insert(blockingStub, request);
+            invalidateSchemaCache(dbName, collectionName);
+            if (allowRetry) {
+                return insert(blockingStub, request, false);
+            }
         }
 
-        // if illegal data, server fails to process insert, else succeed
-        cleanCacheIfFailed(response.getStatus(), dbName, collectionName);
         rpcUtils.handleResponse(title, response.getStatus());
 
         // update the last write timestamp for SESSION consistency
-        String key = GTsDict.CombineCollectionName(actualDbName(dbName), collectionName);
-        GTsDict.getInstance().updateCollectionTs(key, response.getTimestamp());
+        updateTsCache(dbName, collectionName, response.getTimestamp());
 
         // handle integer pk or string pk
         List<Object> ids = new ArrayList<>();
@@ -154,6 +173,7 @@ public class VectorService extends BaseService {
         return InsertResp.builder()
                 .InsertCnt(response.getInsertCnt())
                 .primaryKeys(ids)
+                .cost(getCost(response.getStatus()))
                 .build();
     }
 
@@ -165,9 +185,22 @@ public class VectorService extends BaseService {
     }
 
     public UpsertResp upsert(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, UpsertReq request) {
+        return upsert(blockingStub, request, true);
+    }
+
+    private UpsertResp upsert(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, UpsertReq request,
+                              boolean allowRetry) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
         String title = String.format("Upsert to collection: '%s' in database: '%s'", collectionName, dbName);
+
+        // PyMilvus returns an empty result without issuing the RPC when the data is empty.
+        if (CollectionUtils.isEmpty(request.getData())) {
+            return UpsertResp.builder()
+                    .upsertCnt(0)
+                    .primaryKeys(Collections.emptyList())
+                    .build();
+        }
 
         DescribeCollectionResponse descResp = getCollectionInfo(blockingStub, dbName, collectionName, false);
 
@@ -178,7 +211,7 @@ public class VectorService extends BaseService {
         UpsertRequest rpcRequest;
         try {
             rpcRequest = buildUpsertRequest(request, descResp);
-        } catch (Exception ignored) {
+        } catch (DataNotMatchException ignored) {
             descResp = getCollectionInfo(blockingStub, dbName, collectionName, true);
             rpcRequest = buildUpsertRequest(request, descResp);
         }
@@ -189,18 +222,16 @@ public class VectorService extends BaseService {
         // call upsert() again.
         MutationResult response = blockingStub.upsert(rpcRequest);
         if (response.getStatus().getErrorCode() == io.milvus.grpc.ErrorCode.SchemaMismatch) {
-            getCollectionInfo(blockingStub, dbName, collectionName, true);
-            return this.upsert(blockingStub, request);
+            invalidateSchemaCache(dbName, collectionName);
+            if (allowRetry) {
+                return upsert(blockingStub, request, false);
+            }
         }
 
-        // if illegal data, server fails to process upsert, clean the schema cache
-        // so that the next call of dml can update the cache
-        cleanCacheIfFailed(response.getStatus(), dbName, collectionName);
         rpcUtils.handleResponse(title, response.getStatus());
 
         // update the last write timestamp for SESSION consistency
-        String key = GTsDict.CombineCollectionName(actualDbName(dbName), collectionName);
-        GTsDict.getInstance().updateCollectionTs(key, response.getTimestamp());
+        updateTsCache(dbName, collectionName, response.getTimestamp());
 
         // handle integer pk or string pk
         List<Object> ids = new ArrayList<>();
@@ -212,6 +243,7 @@ public class VectorService extends BaseService {
         return UpsertResp.builder()
                 .upsertCnt(response.getUpsertCnt())
                 .primaryKeys(ids)
+                .cost(getCost(response.getStatus()))
                 .build();
     }
 
@@ -251,10 +283,87 @@ public class VectorService extends BaseService {
 
     }
 
+    public CompletableFuture<QueryResp> queryAsync(
+            Supplier<MilvusServiceGrpc.MilvusServiceFutureStub> futureStubSupplier,
+            QueryReq request, RpcUtils retryUtils) {
+        final QueryRequest baseRequest;
+        final List<Object> ids;
+        try {
+            validateQueryRequest(request);
+            baseRequest = buildBaseQueryRequest(request);
+            ids = CollectionUtils.isEmpty(request.getIds())
+                    ? null : Collections.unmodifiableList(new ArrayList<>(request.getIds()));
+        } catch (Throwable throwable) {
+            return failedFuture(throwable);
+        }
+
+        return retryUtils.retryAsync(() -> queryAsync(
+                futureStubSupplier.get(), baseRequest, ids));
+    }
+
+    private CompletableFuture<QueryResp> queryAsync(
+            MilvusServiceGrpc.MilvusServiceFutureStub futureStub,
+            QueryRequest baseRequest, List<Object> ids) {
+        CompletableFuture<QueryRequest> requestFuture;
+        if (ids == null) {
+            requestFuture = CompletableFuture.completedFuture(baseRequest);
+        } else {
+            requestFuture = transformFuture(
+                    getCollectionInfoAsync(futureStub, baseRequest.getDbName(),
+                            baseRequest.getCollectionName(), false),
+                    descResp -> baseRequest.toBuilder()
+                            .setExpr(vectorUtils.getExprById(getPrimaryKeyName(descResp), ids))
+                            .build());
+        }
+
+        return composeFuture(requestFuture, queryRequest -> {
+            String title = String.format("Query collection: '%s' in database: '%s'",
+                    queryRequest.getCollectionName(), queryRequest.getDbName());
+            return transformFuture(futureStub.query(queryRequest),
+                    response -> convertQueryResponse(title, response));
+        });
+    }
+
+    private void validateQueryRequest(QueryReq request) {
+        if (StringUtils.isNotEmpty(request.getFilter()) && CollectionUtils.isNotEmpty(request.getIds())) {
+            throw new MilvusClientException(ErrorCode.INVALID_PARAMS, "filter and ids can't be set at the same time");
+        }
+    }
+
+    private QueryRequest buildBaseQueryRequest(QueryReq request) {
+        return vectorUtils.ConvertToGrpcQueryRequest(request).toBuilder()
+                .setDbName(actualDbName(request.getDatabaseName()))
+                .build();
+    }
+
+    private String getPrimaryKeyName(DescribeCollectionResponse descResp) {
+        for (FieldSchema field : descResp.getSchema().getFieldsList()) {
+            if (field.getIsPrimaryKey()) {
+                return field.getName();
+            }
+        }
+        throw new MilvusClientException(ErrorCode.SERVER_ERROR,
+                "cannot find the primary key field in collection schema");
+    }
+
+    private QueryResp convertQueryResponse(String title, QueryResults response) {
+        rpcUtils.handleResponse(title, response.getStatus());
+
+        return QueryResp.builder()
+                .queryResults(convertUtils.getEntities(response))
+                .sessionTs(response.getSessionTs())
+                .build();
+    }
+
     public SearchResp search(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, SearchReq request) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
         String title = String.format("Search collection: '%s' in database: '%s'", collectionName, dbName);
+
+        if (request.getLimit() <= 0) {
+            throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                    "limit must be a positive integer, got " + request.getLimit());
+        }
 
         //checkCollectionExist(blockingStub, request.getCollectionName());
 
@@ -265,17 +374,56 @@ public class VectorService extends BaseService {
         SearchResults response = blockingStub.search(searchRequest);
         rpcUtils.handleResponse(title, response.getStatus());
 
-        return SearchResp.builder()
+        SearchResp.SearchRespBuilder respBuilder = SearchResp.builder()
                 .searchResults(convertUtils.getEntities(response))
                 .sessionTs(response.getSessionTs())
-                .recalls(response.getResults().getRecallsList())
-                .build();
+                .recalls(response.getResults().getRecallsList());
+        fillSearchRespFromExtraInfo(respBuilder, response.getStatus().getExtraInfoMap());
+        return respBuilder.build();
+    }
+
+    public CompletableFuture<SearchResp> searchAsync(
+            Supplier<MilvusServiceGrpc.MilvusServiceFutureStub> futureStubSupplier,
+            SearchReq request, RpcUtils retryUtils) {
+        final SearchRequest searchRequest;
+        try {
+            if (request.getLimit() <= 0) {
+                throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                        "limit must be a positive integer, got " + request.getLimit());
+            }
+            searchRequest = vectorUtils.ConvertToGrpcSearchRequest(request).toBuilder()
+                    .setDbName(actualDbName(request.getDatabaseName()))
+                    .build();
+        } catch (Throwable throwable) {
+            return failedFuture(throwable);
+        }
+        String title = String.format("Search collection: '%s' in database: '%s'",
+                searchRequest.getCollectionName(), searchRequest.getDbName());
+        return retryUtils.retryAsync(() -> transformFuture(
+                futureStubSupplier.get().search(searchRequest),
+                response -> convertSearchResponse(title, response)));
+    }
+
+    private SearchResp convertSearchResponse(String title, SearchResults response) {
+        rpcUtils.handleResponse(title, response.getStatus());
+
+        SearchResp.SearchRespBuilder respBuilder = SearchResp.builder()
+                .searchResults(convertUtils.getEntities(response))
+                .sessionTs(response.getSessionTs())
+                .recalls(response.getResults().getRecallsList());
+        fillSearchRespFromExtraInfo(respBuilder, response.getStatus().getExtraInfoMap());
+        return respBuilder.build();
     }
 
     public SearchResp hybridSearch(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, HybridSearchReq request) {
         String dbName = request.getDatabaseName();
         String collectionName = request.getCollectionName();
         String title = String.format("Hybrid search collection: '%s' in database: '%s'", collectionName, dbName);
+
+        if (request.getLimit() <= 0) {
+            throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                    "limit must be a positive integer, got " + request.getLimit());
+        }
 
         //checkCollectionExist(blockingStub, request.getCollectionName());
 
@@ -286,10 +434,68 @@ public class VectorService extends BaseService {
         SearchResults response = blockingStub.hybridSearch(searchRequest);
         rpcUtils.handleResponse(title, response.getStatus());
 
-        return SearchResp.builder()
+        SearchResp.SearchRespBuilder respBuilder = SearchResp.builder()
                 .searchResults(convertUtils.getEntities(response))
-                .recalls(response.getResults().getRecallsList())
-                .build();
+                .sessionTs(response.getSessionTs())
+                .recalls(response.getResults().getRecallsList());
+        fillSearchRespFromExtraInfo(respBuilder, response.getStatus().getExtraInfoMap());
+        return respBuilder.build();
+    }
+
+    public CompletableFuture<SearchResp> hybridSearchAsync(
+            Supplier<MilvusServiceGrpc.MilvusServiceFutureStub> futureStubSupplier,
+            HybridSearchReq request, RpcUtils retryUtils) {
+        final HybridSearchRequest searchRequest;
+        try {
+            if (request.getLimit() <= 0) {
+                throw new MilvusClientException(ErrorCode.INVALID_PARAMS,
+                        "limit must be a positive integer, got " + request.getLimit());
+            }
+            searchRequest = vectorUtils.ConvertToGrpcHybridSearchRequest(request).toBuilder()
+                    .setDbName(actualDbName(request.getDatabaseName()))
+                    .build();
+        } catch (Throwable throwable) {
+            return failedFuture(throwable);
+        }
+        String title = String.format("Hybrid search collection: '%s' in database: '%s'",
+                searchRequest.getCollectionName(), searchRequest.getDbName());
+        return retryUtils.retryAsync(() -> transformFuture(
+                futureStubSupplier.get().hybridSearch(searchRequest),
+                response -> convertSearchResponse(title, response)));
+    }
+
+    private void fillSearchRespFromExtraInfo(SearchResp.SearchRespBuilder respBuilder, java.util.Map<String, String> extraInfo) {
+        if (extraInfo.containsKey("report_value")) {
+            respBuilder.cost(Long.parseLong(extraInfo.get("report_value")));
+        }
+        if (extraInfo.containsKey("scanned_remote_bytes")) {
+            respBuilder.scannedRemoteBytes(Long.parseLong(extraInfo.get("scanned_remote_bytes")));
+        }
+        if (extraInfo.containsKey("scanned_total_bytes")) {
+            respBuilder.scannedTotalBytes(Long.parseLong(extraInfo.get("scanned_total_bytes")));
+        }
+        if (extraInfo.containsKey("cache_hit_ratio")) {
+            respBuilder.cacheHitRatio(Float.parseFloat(extraInfo.get("cache_hit_ratio")));
+        }
+    }
+
+    // decode the report value from the status.extra_info, returns 0 when it is absent or invalid
+    // (consistent with PyMilvus get_cost_from_status, which defaults to "0")
+    private Long getCost(io.milvus.grpc.Status status) {
+        java.util.Map<String, String> extraInfo = status.getExtraInfoMap();
+        if (extraInfo == null) {
+            return 0L;
+        }
+        String reportValue = extraInfo.get("report_value");
+        if (reportValue == null || reportValue.trim().isEmpty()) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(reportValue.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Failed to parse the report_value from status.extra_info: {}", reportValue);
+            return 0L;
+        }
     }
 
     public QueryIterator queryIterator(RpcStubWrapper blockingStub,
@@ -298,7 +504,7 @@ public class VectorService extends BaseService {
                 request.getCollectionName(), false);
         DescribeCollectionResp respR = convertUtils.convertDescCollectionResp(descResp);
         CreateCollectionReq.FieldSchema pkField = respR.getCollectionSchema().getField(respR.getPrimaryFieldName());
-        return new QueryIterator(request, blockingStub, pkField);
+        return new QueryIterator(request, blockingStub, pkField, respR.getCollectionID());
     }
 
     public SearchIterator searchIterator(RpcStubWrapper blockingStub,
@@ -332,16 +538,13 @@ public class VectorService extends BaseService {
         DeleteRequest rpcRequest = dataUtils.ConvertToGrpcDeleteRequest(request);
         MutationResult response = blockingStub.delete(rpcRequest);
 
-        // if illegal data, server fails to process delete, clean the schema cache
-        // so that the next call of dml can update the cache
-        cleanCacheIfFailed(response.getStatus(), dbName, collectionName);
         rpcUtils.handleResponse(title, response.getStatus());
 
         // update the last write timestamp for SESSION consistency
-        String key = GTsDict.CombineCollectionName(actualDbName(dbName), collectionName);
-        GTsDict.getInstance().updateCollectionTs(key, response.getTimestamp());
+        updateTsCache(dbName, collectionName, response.getTimestamp());
         return DeleteResp.builder()
                 .deleteCnt(response.getDeleteCnt())
+                .cost(getCost(response.getStatus()))
                 .build();
     }
 
@@ -350,20 +553,60 @@ public class VectorService extends BaseService {
         String collectionName = request.getCollectionName();
         String title = String.format("Get entities of collection: '%s' in database: '%s'", collectionName, dbName);
         logger.debug(title);
-        QueryReq queryReq = QueryReq.builder()
-                .databaseName(dbName)
-                .collectionName(collectionName)
-                .ids(request.getIds())
-                .build();
-        if (request.getOutputFields() != null) {
-            queryReq.setOutputFields(request.getOutputFields());
+        // PyMilvus returns an empty result without issuing the RPC when the ids are empty.
+        if (CollectionUtils.isEmpty(request.getIds())) {
+            return GetResp.builder()
+                    .getResults(Collections.emptyList())
+                    .build();
         }
         // call query to get the result
-        QueryResp queryResp = query(blockingStub, queryReq);
+        QueryResp queryResp = query(blockingStub, toQueryReq(request));
 
         return GetResp.builder()
                 .getResults(queryResp.getQueryResults())
                 .build();
+    }
+
+    public CompletableFuture<GetResp> getAsync(
+            Supplier<MilvusServiceGrpc.MilvusServiceFutureStub> futureStubSupplier,
+            GetReq request, RpcUtils retryUtils) {
+        String dbName = request.getDatabaseName();
+        String collectionName = request.getCollectionName();
+        String title = String.format("Get entities of collection: '%s' in database: '%s'", collectionName, dbName);
+        logger.debug(title);
+        // PyMilvus returns an empty result without issuing the RPC when the ids are empty.
+        if (CollectionUtils.isEmpty(request.getIds())) {
+            return CompletableFuture.completedFuture(GetResp.builder()
+                    .getResults(Collections.emptyList())
+                    .build());
+        }
+        final QueryReq queryReq;
+        try {
+            queryReq = toQueryReq(request);
+        } catch (Throwable throwable) {
+            return failedFuture(throwable);
+        }
+        // call queryAsync to get the result
+        return transformFuture(
+                queryAsync(futureStubSupplier, queryReq, retryUtils),
+                queryResp -> GetResp.builder()
+                        .getResults(queryResp.getQueryResults())
+                        .build());
+    }
+
+    private QueryReq toQueryReq(GetReq request) {
+        QueryReq.QueryReqBuilder queryReqBuilder = QueryReq.builder()
+                .databaseName(request.getDatabaseName())
+                .collectionName(request.getCollectionName())
+                .ids(request.getIds());
+        if (StringUtils.isNotEmpty(request.getPartitionName())) {
+            queryReqBuilder.partitionNames(Collections.singletonList(request.getPartitionName()));
+        }
+        QueryReq queryReq = queryReqBuilder.build();
+        if (request.getOutputFields() != null) {
+            queryReq.setOutputFields(request.getOutputFields());
+        }
+        return queryReq;
     }
 
     public RunAnalyzerResp runAnalyzer(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, RunAnalyzerReq request) {
@@ -383,14 +626,16 @@ public class VectorService extends BaseService {
 
         String params = JsonUtils.toJson(request.getAnalyzerParams());
         logger.debug(params);
-        RunAnalyzerRequest runRequest = builder.addAllPlaceholder(byteStrings)
-                .setAnalyzerParams(params)
+        RunAnalyzerRequest.Builder runRequestBuilder = builder.addAllPlaceholder(byteStrings)
                 .setWithDetail(request.getWithDetail())
                 .setWithHash(request.getWithHash())
-                .setDbName(request.getDatabaseName())
+                .setDbName(actualDbName(request.getDatabaseName()))
                 .setCollectionName(request.getCollectionName())
-                .setFieldName(request.getFieldName())
-                .build();
+                .setFieldName(request.getFieldName());
+        if (request.getAnalyzerParams() != null && !request.getAnalyzerParams().isEmpty()) {
+            runRequestBuilder.setAnalyzerParams(params);
+        }
+        RunAnalyzerRequest runRequest = runRequestBuilder.build();
         RunAnalyzerResponse response = blockingStub.runAnalyzer(runRequest);
         rpcUtils.handleResponse(title, response.getStatus());
 
@@ -417,5 +662,125 @@ public class VectorService extends BaseService {
         return RunAnalyzerResp.builder()
                 .results(toResults)
                 .build();
+    }
+
+    private <T> CompletableFuture<T> failedFuture(Throwable throwable) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        future.completeExceptionally(throwable);
+        return future;
+    }
+
+    private <T, R> CompletableFuture<R> transformFuture(ListenableFuture<T> source,
+                                                        Function<T, R> converter) {
+        CompletableFuture<R> target = new CompletableFuture<R>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                boolean cancelled = super.cancel(mayInterruptIfRunning);
+                if (cancelled) {
+                    source.cancel(mayInterruptIfRunning);
+                }
+                return cancelled;
+            }
+        };
+        Futures.addCallback(source, new FutureCallback<T>() {
+            @Override
+            public void onSuccess(T result) {
+                if (target.isDone()) {
+                    return;
+                }
+                try {
+                    target.complete(converter.apply(result));
+                } catch (Throwable throwable) {
+                    target.completeExceptionally(throwable);
+                }
+            }
+
+            @Override
+            public void onFailure(Throwable throwable) {
+                target.completeExceptionally(throwable);
+            }
+        }, MoreExecutors.directExecutor());
+        return target;
+    }
+
+    private <T, R> CompletableFuture<R> transformFuture(CompletableFuture<T> source,
+                                                        Function<T, R> converter) {
+        CompletableFuture<R> target = new CompletableFuture<R>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                boolean cancelled = super.cancel(mayInterruptIfRunning);
+                if (cancelled) {
+                    source.cancel(mayInterruptIfRunning);
+                }
+                return cancelled;
+            }
+        };
+        source.whenComplete((value, throwable) -> {
+            if (target.isDone()) {
+                return;
+            }
+            if (throwable != null) {
+                target.completeExceptionally(throwable);
+                return;
+            }
+            try {
+                target.complete(converter.apply(value));
+            } catch (Throwable conversionFailure) {
+                target.completeExceptionally(conversionFailure);
+            }
+        });
+        return target;
+    }
+
+    private <T, R> CompletableFuture<R> composeFuture(
+            CompletableFuture<T> source, Function<T, CompletableFuture<R>> composer) {
+        AtomicReference<CompletableFuture<?>> nextFuture = new AtomicReference<>();
+        CompletableFuture<R> target = new CompletableFuture<R>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                boolean cancelled = super.cancel(mayInterruptIfRunning);
+                if (cancelled) {
+                    source.cancel(mayInterruptIfRunning);
+                    CompletableFuture<?> next = nextFuture.get();
+                    if (next != null) {
+                        next.cancel(mayInterruptIfRunning);
+                    }
+                }
+                return cancelled;
+            }
+        };
+        source.whenComplete((value, throwable) -> {
+            if (target.isDone()) {
+                return;
+            }
+            if (throwable != null) {
+                target.completeExceptionally(throwable);
+                return;
+            }
+
+            CompletableFuture<R> next;
+            try {
+                next = composer.apply(value);
+                if (next == null) {
+                    throw new NullPointerException("Future composer returned null future");
+                }
+            } catch (Throwable compositionFailure) {
+                target.completeExceptionally(compositionFailure);
+                return;
+            }
+            nextFuture.set(next);
+            if (target.isCancelled()) {
+                next.cancel(true);
+                return;
+            }
+            next.whenComplete((result, nextFailure) -> {
+                if (nextFailure == null) {
+                    target.complete(result);
+                } else {
+                    target.completeExceptionally(nextFailure);
+                }
+            });
+        });
+        return target;
     }
 }

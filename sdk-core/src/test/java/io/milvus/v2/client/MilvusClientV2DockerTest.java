@@ -26,13 +26,14 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
 import io.milvus.TestUtils;
+import io.milvus.grpc.LoadState;
 import io.milvus.common.clientenum.FunctionType;
 import io.milvus.common.resourcegroup.NodeInfo;
 import io.milvus.common.resourcegroup.ResourceGroupConfig;
 import io.milvus.common.resourcegroup.ResourceGroupLimit;
 import io.milvus.common.resourcegroup.ResourceGroupTransfer;
 import io.milvus.common.utils.Float16Utils;
-import io.milvus.common.utils.GTsDict;
+import io.milvus.common.utils.cache.CollectionTsCache;
 import io.milvus.common.utils.JsonUtils;
 import io.milvus.orm.iterator.QueryIterator;
 import io.milvus.orm.iterator.SearchIterator;
@@ -44,10 +45,12 @@ import io.milvus.response.QueryResultsWrapper;
 import io.milvus.v2.common.ConsistencyLevel;
 import io.milvus.v2.common.DataType;
 import io.milvus.v2.common.IndexParam;
+import io.milvus.v2.exception.ErrorCode;
 import io.milvus.v2.exception.MilvusClientException;
 import io.milvus.v2.service.collection.request.*;
 import io.milvus.v2.service.collection.response.DescribeCollectionResp;
 import io.milvus.v2.service.collection.response.DescribeReplicasResp;
+import io.milvus.v2.service.collection.response.GetLoadStateResp;
 import io.milvus.v2.service.collection.response.ListCollectionsResp;
 import io.milvus.v2.service.database.request.*;
 import io.milvus.v2.service.database.response.DescribeDatabaseResp;
@@ -64,15 +67,13 @@ import io.milvus.v2.service.resourcegroup.request.*;
 import io.milvus.v2.service.resourcegroup.response.DescribeResourceGroupResp;
 import io.milvus.v2.service.resourcegroup.response.ListResourceGroupsResp;
 import io.milvus.v2.service.utility.request.*;
-import io.milvus.v2.service.utility.response.CheckHealthResp;
-import io.milvus.v2.service.utility.response.CompactResp;
-import io.milvus.v2.service.utility.response.GetPersistentSegmentInfoResp;
-import io.milvus.v2.service.utility.response.GetQuerySegmentInfoResp;
+import io.milvus.v2.service.utility.response.*;
 import io.milvus.v2.service.vector.request.*;
 import io.milvus.v2.service.vector.request.data.*;
 import io.milvus.v2.service.vector.request.ranker.RRFRanker;
 import io.milvus.v2.service.vector.request.ranker.WeightedRanker;
 import io.milvus.v2.service.vector.response.*;
+import io.milvus.v2.utils.DataUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.text.RandomStringGenerator;
 import org.junit.jupiter.api.AfterAll;
@@ -315,6 +316,25 @@ class MilvusClientV2DockerTest {
     }
 
     @Test
+    void testGetServerVersion() {
+        GetServerVersionResp simpleResp = client.getServerVersionV2(GetServerVersionReq.builder().build());
+        Assertions.assertTrue(StringUtils.isNotBlank(simpleResp.getVersion()));
+        Assertions.assertNull(simpleResp.getBuildTime());
+        Assertions.assertNull(simpleResp.getGitCommit());
+        Assertions.assertNull(simpleResp.getGoVersion());
+        Assertions.assertNull(simpleResp.getDeployMode());
+
+        GetServerVersionResp detailResp = client.getServerVersionV2(GetServerVersionReq.builder()
+                .detail(true)
+                .build());
+        Assertions.assertTrue(StringUtils.isNotBlank(detailResp.getVersion()));
+        Assertions.assertTrue(StringUtils.isNotBlank(detailResp.getBuildTime()));
+        Assertions.assertTrue(StringUtils.isNotBlank(detailResp.getGitCommit()));
+        Assertions.assertTrue(StringUtils.isNotBlank(detailResp.getGoVersion()));
+        Assertions.assertEquals("STANDALONE", detailResp.getDeployMode());
+    }
+
+    @Test
     void testFloatVectors() {
         CheckHealthResp healthy = client.checkHealth();
         Assertions.assertTrue(healthy.getIsHealthy());
@@ -351,25 +371,35 @@ class MilvusClientV2DockerTest {
                 .build());
 
         // master branch, getPersistentSegmentInfo cannot ensure the segment is returned after flush()
-        while (true) {
-            // get persistent segment info
-            GetPersistentSegmentInfoResp pSegInfo = client.getPersistentSegmentInfo(GetPersistentSegmentInfoReq.builder()
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
+        GetPersistentSegmentInfoResp pSegInfo = null;
+        while (System.currentTimeMillis() < deadline) {
+            pSegInfo = client.getPersistentSegmentInfo(GetPersistentSegmentInfoReq.builder()
                     .collectionName(randomCollectionName)
                     .build());
-            if (pSegInfo.getSegmentInfos().size() == 0) {
-                continue;
+            if (!pSegInfo.getSegmentInfos().isEmpty()) {
+                break;
             }
-            Assertions.assertEquals(1, pSegInfo.getSegmentInfos().size());
-            GetPersistentSegmentInfoResp.PersistentSegmentInfo pInfo = pSegInfo.getSegmentInfos().get(0);
-            Assertions.assertTrue(pInfo.getSegmentID() > 0L);
-            Assertions.assertTrue(pInfo.getCollectionID() > 0L);
-            Assertions.assertTrue(pInfo.getPartitionID() > 0L);
-            Assertions.assertEquals(count, pInfo.getNumOfRows());
-            Assertions.assertEquals("Flushed", pInfo.getState());
-            Assertions.assertEquals("L1", pInfo.getLevel());
-//            Assertions.assertFalse(pInfo.getIsSorted());
-            break;
+            try {
+                TimeUnit.MILLISECONDS.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                Assertions.fail("Interrupted while waiting for persistent segment info in collection: " + randomCollectionName);
+            }
         }
+        Assertions.assertNotNull(pSegInfo, "Timed out waiting for persistent segment info response");
+        Assertions.assertFalse(pSegInfo.getSegmentInfos().isEmpty(), "Timed out waiting for persistent segment info in collection: " + randomCollectionName);
+        Assertions.assertEquals(1, pSegInfo.getSegmentInfos().size());
+        GetPersistentSegmentInfoResp.PersistentSegmentInfo pInfo = pSegInfo.getSegmentInfos().get(0);
+        Assertions.assertTrue(pInfo.getSegmentID() > 0L);
+        Assertions.assertTrue(pInfo.getCollectionID() > 0L);
+        Assertions.assertTrue(pInfo.getPartitionID() > 0L);
+        Assertions.assertEquals(count, pInfo.getNumOfRows());
+        Assertions.assertEquals(randomCollectionName, pInfo.getCollectionName());
+        Assertions.assertEquals("Flushed", pInfo.getState());
+        Assertions.assertEquals("L1", pInfo.getLevel());
+        Assertions.assertNotNull(pInfo.getStorageVersion());
+//        Assertions.assertFalse(pInfo.getIsSorted());
 
         // compact
         CompactResp compactResp = client.compact(CompactReq.builder()
@@ -414,6 +444,7 @@ class MilvusClientV2DockerTest {
         Assertions.assertEquals("L1", qInfo.getLevel());
         Assertions.assertEquals(1, qInfo.getNodeIDs().size());
         Assertions.assertTrue(qInfo.getNodeIDs().get(0) > 0L);
+        Assertions.assertNotNull(qInfo.getStorageVersion());
         Assertions.assertTrue(qInfo.getIsSorted());
 
         // create partition, upsert one row to the partition
@@ -1958,6 +1989,358 @@ class MilvusClientV2DockerTest {
     }
 
     @Test
+    void testInsertUpsertValidation() {
+        String autoIdCollection = "validation_auto_" + generator.generate(8);
+        String schemaCollection = "validation_schema_" + generator.generate(8);
+
+        try {
+            CreateCollectionReq.CollectionSchema autoIdSchema = CreateCollectionReq.CollectionSchema.builder()
+                    .enableDynamicField(true)
+                    .build();
+            autoIdSchema.addField(AddFieldReq.builder()
+                    .fieldName("id")
+                    .dataType(DataType.Int64)
+                    .isPrimaryKey(true)
+                    .autoID(true)
+                    .build());
+            autoIdSchema.addField(AddFieldReq.builder()
+                    .fieldName("vector")
+                    .dataType(DataType.FloatVector)
+                    .dimension(2)
+                    .build());
+            autoIdSchema.addField(AddFieldReq.builder()
+                    .fieldName("tag")
+                    .dataType(DataType.VarChar)
+                    .maxLength(100)
+                    .build());
+            client.createCollection(CreateCollectionReq.builder()
+                    .collectionName(autoIdCollection)
+                    .collectionSchema(autoIdSchema)
+                    .indexParams(Collections.singletonList(IndexParam.builder()
+                            .fieldName("vector")
+                            .indexType(IndexParam.IndexType.FLAT)
+                            .metricType(IndexParam.MetricType.L2)
+                            .build()))
+                    .property("allow_insert_auto_id", "true")
+                    .build());
+            client.loadCollection(LoadCollectionReq.builder()
+                    .collectionName(autoIdCollection)
+                    .sync(true)
+                    .build());
+
+            // Insert excludes an auto-ID field when it is not provided.
+            JsonObject insertWithoutId = new JsonObject();
+            insertWithoutId.add("vector", JsonUtils.toJsonTree(Arrays.asList(1.0f, 2.0f)));
+            insertWithoutId.addProperty("tag", "generated-id");
+            InsertResp insertResp = client.insert(InsertReq.builder()
+                    .collectionName(autoIdCollection)
+                    .data(Collections.singletonList(insertWithoutId))
+                    .build());
+            Assertions.assertEquals(1, insertResp.getInsertCnt());
+
+            // Insert accepts an explicitly provided auto-ID field.
+            JsonObject insertWithId = new JsonObject();
+            insertWithId.addProperty("id", 100L);
+            insertWithId.add("vector", JsonUtils.toJsonTree(Arrays.asList(3.0f, 4.0f)));
+            insertWithId.addProperty("tag", "explicit-id");
+            insertResp = client.insert(InsertReq.builder()
+                    .collectionName(autoIdCollection)
+                    .data(Collections.singletonList(insertWithId))
+                    .build());
+            Assertions.assertEquals(1, insertResp.getInsertCnt());
+
+            // Explicit auto-ID must be supplied for every row or omitted from every row, independent of row order.
+            List<List<JsonObject>> mixedAutoIdBatches = Arrays.asList(
+                    Arrays.asList(insertWithoutId, insertWithId),
+                    Arrays.asList(insertWithId, insertWithoutId));
+            for (List<JsonObject> batch : mixedAutoIdBatches) {
+                MilvusClientException mixedAutoId = Assertions.assertThrows(MilvusClientException.class,
+                        () -> client.insert(InsertReq.builder()
+                                .collectionName(autoIdCollection)
+                                .data(batch)
+                                .build()));
+                Assertions.assertEquals(ErrorCode.INVALID_PARAMS, mixedAutoId.getErrorCode());
+                Assertions.assertTrue(mixedAutoId.getMessage().contains("all rows"));
+                Assertions.assertTrue(mixedAutoId.getMessage().contains("id"));
+            }
+
+            // Full upsert includes the auto-ID field in its required input fields.
+            JsonObject fullUpsertWithoutId = new JsonObject();
+            fullUpsertWithoutId.add("vector", JsonUtils.toJsonTree(Arrays.asList(5.0f, 6.0f)));
+            fullUpsertWithoutId.addProperty("tag", "missing-id");
+            MilvusClientException missingAutoId = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.upsert(UpsertReq.builder()
+                            .collectionName(autoIdCollection)
+                            .data(Collections.singletonList(fullUpsertWithoutId))
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, missingAutoId.getErrorCode());
+            Assertions.assertTrue(missingAutoId.getMessage().contains("id"));
+
+            // Partial upsert does not require non-primary fields that are absent from the row.
+            JsonObject partialUpsert = new JsonObject();
+            partialUpsert.addProperty("id", 100L);
+            partialUpsert.add("vector", JsonUtils.toJsonTree(Arrays.asList(7.0f, 8.0f)));
+            UpsertResp partialUpsertResp = client.upsert(UpsertReq.builder()
+                    .collectionName(autoIdCollection)
+                    .data(Collections.singletonList(partialUpsert))
+                    .partialUpdate(true)
+                    .build());
+            Assertions.assertEquals(1, partialUpsertResp.getUpsertCnt());
+
+            CreateCollectionReq.CollectionSchema validationSchema = CreateCollectionReq.CollectionSchema.builder()
+                    .build();
+            validationSchema.addField(AddFieldReq.builder()
+                    .fieldName("id")
+                    .dataType(DataType.Int64)
+                    .isPrimaryKey(true)
+                    .build());
+            validationSchema.addField(AddFieldReq.builder()
+                    .fieldName("vector")
+                    .dataType(DataType.FloatVector)
+                    .dimension(2)
+                    .build());
+            Map<String, Object> analyzerParams = new HashMap<>();
+            analyzerParams.put("tokenizer", "standard");
+            validationSchema.addField(AddFieldReq.builder()
+                    .fieldName("text")
+                    .dataType(DataType.VarChar)
+                    .maxLength(100)
+                    .enableAnalyzer(true)
+                    .analyzerParams(analyzerParams)
+                    .build());
+            validationSchema.addField(AddFieldReq.builder()
+                    .fieldName("sparse")
+                    .dataType(DataType.SparseFloatVector)
+                    .build());
+            validationSchema.addField(AddFieldReq.builder()
+                    .fieldName("metadata")
+                    .dataType(DataType.Array)
+                    .elementType(DataType.Struct)
+                    .maxCapacity(10)
+                    .addStructField(AddFieldReq.builder()
+                            .fieldName("score")
+                            .dataType(DataType.Float)
+                            .build())
+                    .build());
+            validationSchema.addFunction(CreateCollectionReq.Function.builder()
+                    .name("bm25")
+                    .functionType(FunctionType.BM25)
+                    .inputFieldNames(Collections.singletonList("text"))
+                    .outputFieldNames(Collections.singletonList("sparse"))
+                    .build());
+            client.createCollection(CreateCollectionReq.builder()
+                    .collectionName(schemaCollection)
+                    .collectionSchema(validationSchema)
+                    .indexParams(Arrays.asList(
+                            IndexParam.builder()
+                                    .fieldName("vector")
+                                    .indexType(IndexParam.IndexType.FLAT)
+                                    .metricType(IndexParam.MetricType.L2)
+                                    .build(),
+                            IndexParam.builder()
+                                    .fieldName("sparse")
+                                    .indexType(IndexParam.IndexType.SPARSE_INVERTED_INDEX)
+                                    .metricType(IndexParam.MetricType.BM25)
+                                    .build()))
+                    .build());
+            client.loadCollection(LoadCollectionReq.builder()
+                    .collectionName(schemaCollection)
+                    .sync(true)
+                    .build());
+            DescribeCollectionResp validationDesc = client.describeCollection(DescribeCollectionReq.builder()
+                    .collectionName(schemaCollection)
+                    .build());
+
+            JsonObject baseRow = new JsonObject();
+            baseRow.addProperty("id", 1L);
+            baseRow.add("vector", JsonUtils.toJsonTree(Arrays.asList(1.0f, 2.0f)));
+            baseRow.addProperty("text", "base text");
+            JsonObject metadata = new JsonObject();
+            metadata.addProperty("score", 1.0f);
+            JsonArray metadataArray = new JsonArray();
+            metadataArray.add(metadata);
+            baseRow.add("metadata", metadataArray);
+            insertResp = client.insert(InsertReq.builder()
+                    .collectionName(schemaCollection)
+                    .data(Collections.singletonList(baseRow))
+                    .build());
+            Assertions.assertEquals(1, insertResp.getInsertCnt());
+
+            // Function output fields are generated by Milvus and cannot be supplied by users.
+            JsonObject functionOutputRow = baseRow.deepCopy();
+            functionOutputRow.add("sparse", new JsonObject());
+            MilvusClientException functionOutput = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.insert(InsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(functionOutputRow))
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, functionOutput.getErrorCode());
+            Assertions.assertTrue(functionOutput.getMessage().contains("sparse"));
+
+            // Unknown fields are rejected when dynamic fields are disabled.
+            JsonObject unknownFieldRow = baseRow.deepCopy();
+            unknownFieldRow.addProperty("unknown", "value");
+            MilvusClientException unknownField = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.insert(InsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(unknownFieldRow))
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, unknownField.getErrorCode());
+            Assertions.assertTrue(unknownField.getMessage().contains("unknown"));
+
+            // Insert and full upsert reject an omitted struct field before sending the request.
+            JsonObject fullWithoutStruct = new JsonObject();
+            fullWithoutStruct.addProperty("id", 2L);
+            fullWithoutStruct.add("vector", JsonUtils.toJsonTree(Arrays.asList(3.0f, 4.0f)));
+            fullWithoutStruct.addProperty("text", "without struct");
+            MilvusClientException insertWithoutStruct = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.insert(InsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(fullWithoutStruct))
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, insertWithoutStruct.getErrorCode());
+            Assertions.assertTrue(insertWithoutStruct.getMessage().contains("metadata"));
+
+            MilvusClientException fullUpsertWithoutStruct = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.upsert(UpsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(fullWithoutStruct))
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, fullUpsertWithoutStruct.getErrorCode());
+            Assertions.assertTrue(fullUpsertWithoutStruct.getMessage().contains("metadata"));
+
+            // Struct elements must contain exactly the configured subfields.
+            JsonObject unexpectedStructFieldRow = baseRow.deepCopy();
+            unexpectedStructFieldRow.getAsJsonArray("metadata").get(0).getAsJsonObject()
+                    .addProperty("extra", "value");
+            MilvusClientException unexpectedStructField = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.insert(InsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(unexpectedStructFieldRow))
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, unexpectedStructField.getErrorCode());
+            Assertions.assertTrue(unexpectedStructField.getMessage().contains("unexpected fields"));
+
+            // Null struct subfields are rejected even if normal fields may support nullable values.
+            JsonObject nullStructFieldRow = baseRow.deepCopy();
+            nullStructFieldRow.getAsJsonArray("metadata").get(0).getAsJsonObject()
+                    .add("score", JsonNull.INSTANCE);
+            MilvusClientException nullStructField = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.insert(InsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(nullStructFieldRow))
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, nullStructField.getErrorCode());
+            Assertions.assertTrue(nullStructField.getMessage().contains("cannot be null"));
+
+            // A whole struct field can be omitted during partial upsert.
+            JsonObject partialWithoutStruct = new JsonObject();
+            partialWithoutStruct.addProperty("id", 1L);
+            partialWithoutStruct.add("vector", JsonUtils.toJsonTree(Arrays.asList(9.0f, 10.0f)));
+            io.milvus.grpc.UpsertRequest partialWithoutStructRequest =
+                    new DataUtils.InsertBuilderWrapper().convertGrpcUpsertRequest(UpsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(partialWithoutStruct))
+                            .partialUpdate(true)
+                            .build(), validationDesc);
+            Assertions.assertTrue(partialWithoutStructRequest.getPartialUpdate());
+            Assertions.assertEquals(2, partialWithoutStructRequest.getFieldsDataCount());
+            Set<String> partialFieldNames = new HashSet<>();
+            partialWithoutStructRequest.getFieldsDataList()
+                    .forEach(fieldData -> partialFieldNames.add(fieldData.getFieldName()));
+            Assertions.assertEquals(new HashSet<>(Arrays.asList("id", "vector")), partialFieldNames);
+
+            // Every supplied field must have the same number of values in a partial-update batch.
+            JsonObject firstPartialRow = new JsonObject();
+            firstPartialRow.addProperty("id", 1L);
+            firstPartialRow.add("vector", JsonUtils.toJsonTree(Arrays.asList(11.0f, 12.0f)));
+            JsonObject secondPartialRow = new JsonObject();
+            secondPartialRow.addProperty("id", 2L);
+            MilvusClientException inconsistentFields = Assertions.assertThrows(MilvusClientException.class,
+                    () -> client.upsert(UpsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Arrays.asList(firstPartialRow, secondPartialRow))
+                            .partialUpdate(true)
+                            .build()));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, inconsistentFields.getErrorCode());
+
+            // A common nonzero count is still invalid when it is shorter than the batch size.
+            JsonObject populatedPartialRow = new JsonObject();
+            populatedPartialRow.addProperty("id", 1L);
+            populatedPartialRow.add("vector", JsonUtils.toJsonTree(Arrays.asList(13.0f, 14.0f)));
+            JsonObject partialRowWithoutVector = new JsonObject();
+            partialRowWithoutVector.addProperty("id", 2L);
+            List<List<JsonObject>> shortFieldBatches = Arrays.asList(
+                    Arrays.asList(populatedPartialRow, partialRowWithoutVector),
+                    Arrays.asList(partialRowWithoutVector, populatedPartialRow));
+            for (List<JsonObject> batch : shortFieldBatches) {
+                MilvusClientException shortFieldCount = Assertions.assertThrows(MilvusClientException.class,
+                        () -> client.upsert(UpsertReq.builder()
+                                .collectionName(schemaCollection)
+                                .data(batch)
+                                .partialUpdate(true)
+                                .build()));
+                Assertions.assertEquals(ErrorCode.INVALID_PARAMS, shortFieldCount.getErrorCode());
+                Assertions.assertTrue(shortFieldCount.getMessage().contains("number of values"));
+            }
+
+            // With dynamic fields enabled, upsert still rejects struct[subfield] storage syntax.
+            validationDesc.getCollectionSchema().setEnableDynamicField(true);
+            JsonObject fullStructSubField = baseRow.deepCopy();
+            fullStructSubField.add("metadata[score]", JsonUtils.toJsonTree(Collections.singletonList(1.0f)));
+            MilvusClientException fullStructSubFieldError = Assertions.assertThrows(MilvusClientException.class,
+                    () -> new DataUtils.InsertBuilderWrapper().convertGrpcUpsertRequest(UpsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(fullStructSubField))
+                            .build(), validationDesc));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, fullStructSubFieldError.getErrorCode());
+            Assertions.assertTrue(fullStructSubFieldError.getMessage().contains("top-level field"));
+
+            JsonObject partialStructSubField = new JsonObject();
+            partialStructSubField.addProperty("id", 1L);
+            partialStructSubField.add("metadata[score]", JsonUtils.toJsonTree(Arrays.asList(1.0f, 2.0f)));
+            MilvusClientException partialStructSubFieldError = Assertions.assertThrows(MilvusClientException.class,
+                    () -> new DataUtils.InsertBuilderWrapper().convertGrpcUpsertRequest(UpsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(partialStructSubField))
+                            .partialUpdate(true)
+                            .build(), validationDesc));
+            Assertions.assertEquals(ErrorCode.INVALID_PARAMS, partialStructSubFieldError.getErrorCode());
+            Assertions.assertTrue(partialStructSubFieldError.getMessage().contains("Partial struct update"));
+
+            // Insert treats struct[subfield] as dynamic, and upsert does the same for a short name.
+            JsonObject dynamicInsertRow = baseRow.deepCopy();
+            dynamicInsertRow.add("metadata[score]", JsonUtils.toJsonTree(Collections.singletonList(1.0f)));
+            io.milvus.grpc.InsertRequest dynamicInsertRequest =
+                    new DataUtils.InsertBuilderWrapper().convertGrpcInsertRequest(InsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(dynamicInsertRow))
+                            .build(), validationDesc);
+            Assertions.assertTrue(dynamicInsertRequest.getFieldsData(
+                    dynamicInsertRequest.getFieldsDataCount() - 1).getIsDynamic());
+
+            JsonObject dynamicShortNameRow = new JsonObject();
+            dynamicShortNameRow.addProperty("id", 1L);
+            dynamicShortNameRow.addProperty("score", "dynamic-value");
+            io.milvus.grpc.UpsertRequest dynamicShortNameRequest =
+                    new DataUtils.InsertBuilderWrapper().convertGrpcUpsertRequest(UpsertReq.builder()
+                            .collectionName(schemaCollection)
+                            .data(Collections.singletonList(dynamicShortNameRow))
+                            .partialUpdate(true)
+                            .build(), validationDesc);
+            Assertions.assertEquals(2, dynamicShortNameRequest.getFieldsDataCount());
+            Assertions.assertTrue(dynamicShortNameRequest.getFieldsData(1).getIsDynamic());
+        } finally {
+            if (client.hasCollection(HasCollectionReq.builder().collectionName(autoIdCollection).build())) {
+                client.dropCollection(DropCollectionReq.builder().collectionName(autoIdCollection).build());
+            }
+            if (client.hasCollection(HasCollectionReq.builder().collectionName(schemaCollection).build())) {
+                client.dropCollection(DropCollectionReq.builder().collectionName(schemaCollection).build());
+            }
+        }
+    }
+
+    @Test
     void testAlias() {
         client.createCollection(CreateCollectionReq.builder()
                 .collectionName("AAA")
@@ -2301,14 +2684,15 @@ class MilvusClientV2DockerTest {
                 .uri(milvus.getEndpoint())
                 .dbName(testDbName)
                 .build();
+        String cacheEndpoint = config.getHost() + ":" + config.getPort();
         // fix tempClient not close
         MilvusClientV2 tempClient = null;
         try {
             tempClient = new MilvusClientV2(config);
 
             // use the temp client to insert correct data into the default collection
-            // there will be a schema cache for this collection in the temp client
-            // there will be timestamp for this collection in the global GTsDict
+            // there will be an entry for this collection in the process-global schema cache
+            // there will be a timestamp for this collection in the global timestamp cache
             JsonObject row = new JsonObject();
             row.addProperty("pk", 8);
             row.add("vector", JsonUtils.toJsonTree(utils.generateFloatVector(DIMENSION)));
@@ -2318,12 +2702,10 @@ class MilvusClientV2DockerTest {
             Assertions.assertEquals(1L, insertResp.getInsertCnt());
 
             // check the timestamp of this collection, must be positive
-            String key1 = GTsDict.CombineCollectionName("default", randomCollectionName);
-            Long ts11 = GTsDict.getInstance().getCollectionTs(key1);
-            Assertions.assertNotNull(ts11);
+            long ts11 = CollectionTsCache.getInstance().get(cacheEndpoint, "default", randomCollectionName);
             Assertions.assertTrue(ts11 > 0L);
 
-            // insert wrong data, the schema cache will be removed
+            // insert wrong data; the refreshed, valid collection schema remains cached
             row.add("vector", JsonUtils.toJsonTree(utils.generateFloatVector(7)));
             Assertions.assertThrows(MilvusClientException.class, () -> client.insert(InsertReq.builder()
                     .databaseName("default")
@@ -2342,14 +2724,14 @@ class MilvusClientV2DockerTest {
             Assertions.assertEquals(1L, upsertResp.getUpsertCnt());
 
             // check the timestamp of this collection, must be a new positive
-            Long ts12 = GTsDict.getInstance().getCollectionTs(key1);
-            Assertions.assertNotNull(ts12);
+            long ts12 = CollectionTsCache.getInstance().get(cacheEndpoint, "default", randomCollectionName);
             Assertions.assertTrue(ts12 > ts11);
 
             // create a new collection with the same name, different schema, in the test db
             createSimpleCollection(tempClient, "", randomCollectionName, "aaa", false, 4, ConsistencyLevel.BOUNDED);
 
             // use the temp client to insert wrong data, wrong dimension
+            row.remove("pk");
             row.addProperty("aaa", 22);
             row.add("vector", JsonUtils.toJsonTree(utils.generateFloatVector(7)));
             MilvusClientV2 finalTempClient = tempClient;
@@ -2359,9 +2741,8 @@ class MilvusClientV2DockerTest {
                     .build()));
 
             // check the timestamp of this collection, must be null
-            String key2 = GTsDict.CombineCollectionName(testDbName, randomCollectionName);
-            Long ts21 = GTsDict.getInstance().getCollectionTs(key2);
-            Assertions.assertNull(ts21);
+            long ts21 = CollectionTsCache.getInstance().get(cacheEndpoint, testDbName, randomCollectionName);
+            Assertions.assertEquals(0L, ts21);
 
             // use the temp client to do upsert correct data
             TimeUnit.MILLISECONDS.sleep(100);
@@ -2373,8 +2754,7 @@ class MilvusClientV2DockerTest {
             Assertions.assertEquals(1L, upsertResp.getUpsertCnt());
 
             // check the timestamp of this collection, must be positive
-            Long ts22 = GTsDict.getInstance().getCollectionTs(key2);
-            Assertions.assertNotNull(ts22);
+            long ts22 = CollectionTsCache.getInstance().get(cacheEndpoint, testDbName, randomCollectionName);
             Assertions.assertTrue(ts22 > 0L);
 
             // tempClient delete data
@@ -2384,8 +2764,7 @@ class MilvusClientV2DockerTest {
                     .build());
 
             // check the timestamp of this collection, must be greater than previous
-            Long ts23 = GTsDict.getInstance().getCollectionTs(key2);
-            Assertions.assertNotNull(ts23);
+            long ts23 = CollectionTsCache.getInstance().get(cacheEndpoint, testDbName, randomCollectionName);
             Assertions.assertTrue(ts23 > ts22);
 
             // use the default client to drop the collection in the new db
@@ -2395,8 +2774,8 @@ class MilvusClientV2DockerTest {
                     .build());
 
             // check the timestamp of this collection, must be deleted
-            Long ts31 = GTsDict.getInstance().getCollectionTs(key2);
-            Assertions.assertNull(ts31);
+            long ts31 = CollectionTsCache.getInstance().get(cacheEndpoint, testDbName, randomCollectionName);
+            Assertions.assertEquals(0L, ts31);
         } finally {
             if (tempClient != null) {
                 tempClient.close();
@@ -2942,12 +3321,15 @@ class MilvusClientV2DockerTest {
                 .sync(true)
                 .build());
 
-        // specify the temp database name to get load state of partition
-        Assertions.assertTrue(client.getLoadState(GetLoadStateReq.builder()
+        // specify the temp database name to get detailed load state of partition
+        GetLoadStateResp loadStateResp = client.getLoadStateV2(GetLoadStateReq.builder()
                 .databaseName(tempDatabaseName)
                 .collectionName(randomCollectionName)
                 .partitionName(partitionName)
-                .build()));
+                .build());
+        Assertions.assertEquals(LoadState.LoadStateLoaded, loadStateResp.getState());
+        Assertions.assertEquals(LoadState.LoadStateLoaded.name(), loadStateResp.getStateName());
+        Assertions.assertNull(loadStateResp.getProgress());
 
         // specify the temp database name to release partition
         client.releasePartitions(ReleasePartitionsReq.builder()
@@ -2970,19 +3352,37 @@ class MilvusClientV2DockerTest {
                 .fieldName(vectorFieldName)
                 .build());
 
-        // specify the temp database name to rename collection
+        // set target database name to rename collection
+        // the renamed collection will be moved to the target database, and the source collection will be deleted
         String newCollName = "new_name";
         client.renameCollection(RenameCollectionReq.builder()
                 .databaseName(tempDatabaseName)
                 .collectionName(randomCollectionName)
                 .newCollectionName(newCollName)
+                .targetDbName("default")
                 .build());
 
-        // specify the temp database name to drop collection
-        client.dropCollection(DropCollectionReq.builder()
+        Boolean has = client.hasCollection(HasCollectionReq.builder()
                 .databaseName(tempDatabaseName)
                 .collectionName(newCollName)
                 .build());
+        Assertions.assertFalse(has);
+
+        has = client.hasCollection(HasCollectionReq.builder()
+                .databaseName("default")
+                .collectionName(newCollName)
+                .build());
+        Assertions.assertTrue(has);
+
+        // since the renamed collection is in default db, no need to specify databaseName
+        client.dropCollection(DropCollectionReq.builder()
+                .collectionName(newCollName)
+                .build());
+
+        has = client.hasCollection(HasCollectionReq.builder()
+                .collectionName(newCollName)
+                .build());
+        Assertions.assertFalse(has);
     }
 
     @Test
@@ -3746,6 +4146,10 @@ class MilvusClientV2DockerTest {
                 .build());
         Assertions.assertEquals(count, insertResp.getInsertCnt());
 
+        client.loadCollection(LoadCollectionReq.builder()
+                .collectionName(randomCollectionName)
+                .build());
+
         DescribeCollectionResp descCollResp = client.describeCollection(DescribeCollectionReq.builder()
                 .collectionName(randomCollectionName)
                 .build());
@@ -3835,6 +4239,64 @@ class MilvusClientV2DockerTest {
                 Assertions.assertEquals(positionLen2.get(i), token.getPositionLength());
                 Assertions.assertEquals(hash2.get(i), token.getHash());
             }
+        }
+    }
+
+    @Test
+    void testRunAnalyzerCollectionMode() {
+        String collectionName = generator.generate(10);
+        CreateCollectionReq.CollectionSchema collectionSchema = CreateCollectionReq.CollectionSchema.builder()
+                .build();
+        collectionSchema.addField(AddFieldReq.builder()
+                .fieldName("id")
+                .dataType(DataType.Int64)
+                .isPrimaryKey(Boolean.TRUE)
+                .autoID(Boolean.FALSE)
+                .build());
+        collectionSchema.addField(AddFieldReq.builder()
+                .fieldName("vector")
+                .dataType(DataType.FloatVector)
+                .dimension(DIMENSION)
+                .build());
+        Map<String, Object> analyzerParams = new HashMap<>();
+        analyzerParams.put("tokenizer", "standard");
+        collectionSchema.addField(AddFieldReq.builder()
+                .fieldName("text")
+                .dataType(DataType.VarChar)
+                .maxLength(100)
+                .enableAnalyzer(true)
+                .analyzerParams(analyzerParams)
+                .build());
+        client.createCollection(CreateCollectionReq.builder()
+                .collectionName(collectionName)
+                .collectionSchema(collectionSchema)
+                .build());
+
+        IndexParam indexParam = IndexParam.builder()
+                .fieldName("vector")
+                .indexType(IndexParam.IndexType.AUTOINDEX)
+                .metricType(IndexParam.MetricType.COSINE)
+                .build();
+        client.createIndex(CreateIndexReq.builder()
+                .collectionName(collectionName)
+                .indexParams(Collections.singletonList(indexParam))
+                .build());
+
+        client.loadCollection(LoadCollectionReq.builder()
+                .collectionName(collectionName)
+                .build());
+
+        try {
+            RunAnalyzerResp resp = client.runAnalyzer(RunAnalyzerReq.builder()
+                    .collectionName(collectionName)
+                    .fieldName("text")
+                    .texts(Arrays.asList("Analyzers tokenizers for multi languages"))
+                    .build());
+            List<RunAnalyzerResp.AnalyzerResult> results = resp.getResults();
+            Assertions.assertEquals(1, results.size());
+            Assertions.assertFalse(results.get(0).getTokens().isEmpty());
+        } finally {
+            client.dropCollection(DropCollectionReq.builder().collectionName(collectionName).build());
         }
     }
 

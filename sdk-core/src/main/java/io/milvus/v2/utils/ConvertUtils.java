@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class ConvertUtils {
     public static DataType toProtoDataType(io.milvus.v2.common.DataType dt) {
@@ -106,7 +107,7 @@ public class ConvertUtils {
                         .build());
             }
 
-            // set highlight
+            // set highlight and element offset
             SearchResultsWrapper.Position position = searchResultsWrapper.getOffsetByIndex(i);
             long offset = position.getOffset();
             long k = position.getK();
@@ -124,6 +125,14 @@ public class ConvertUtils {
                             .scores(scores)
                             .build();
                     singleResults.get((int) j).addHighlightResult(fieldName, highlightResultObj);
+                }
+            }
+
+            // set element offset
+            if (response.getResults().hasElementIndices()) {
+                LongArray elementIndices = response.getResults().getElementIndices();
+                for (long j = 0; j < k; j++) {
+                    singleResults.get((int) j).setElementOffset(elementIndices.getData((int) (offset + j)));
                 }
             }
 
@@ -214,13 +223,29 @@ public class ConvertUtils {
                 .collectionSchema(SchemaUtils.convertFromGrpcCollectionSchema(response.getSchema()))
                 .autoID(response.getSchema().getFieldsList().stream().anyMatch(FieldSchema::getAutoID))
                 .enableDynamicField(response.getSchema().getEnableDynamicField())
-                .fieldNames(response.getSchema().getFieldsList().stream().map(FieldSchema::getName).collect(java.util.stream.Collectors.toList()))
-                .vectorFieldNames(response.getSchema().getFieldsList().stream().filter(fieldSchema -> ParamUtils.isVectorDataType(fieldSchema.getDataType())).map(FieldSchema::getName).collect(java.util.stream.Collectors.toList()))
+                .fieldNames(Stream.concat(
+                                response.getSchema().getFieldsList().stream().map(FieldSchema::getName),
+                                response.getSchema().getStructArrayFieldsList().stream().map(StructArrayFieldSchema::getName))
+                        .distinct()
+                        .collect(Collectors.toList()))
+                .vectorFieldNames(Stream.concat(
+                                response.getSchema().getFieldsList().stream()
+                                        .filter(fieldSchema -> ParamUtils.isVectorDataType(fieldSchema.getDataType()))
+                                        .map(FieldSchema::getName),
+                                response.getSchema().getStructArrayFieldsList().stream()
+                                        .flatMap(structField -> structField.getFieldsList().stream()
+                                                .filter(subField -> ParamUtils.isVectorDataType(subField.getElementType()))
+                                                .map(subField -> structField.getName() + "[" + subField.getName() + "]")))
+                        .distinct()
+                        .collect(Collectors.toList()))
                 .primaryFieldName(response.getSchema().getFieldsList().stream().filter(FieldSchema::getIsPrimaryKey).map(FieldSchema::getName).collect(java.util.stream.Collectors.toList()).get(0))
                 .createTime(response.getCreatedTimestamp())
                 .createUtcTime(response.getCreatedUtcTimestamp())
+                .updateTimestamp(response.getUpdateTimestamp())
                 .consistencyLevel(io.milvus.v2.common.ConsistencyLevel.valueOf(response.getConsistencyLevel().name().toUpperCase()))
+                .consistencyLevelName(response.getConsistencyLevel().name())
                 .shardsNum(response.getShardsNum())
+                .aliases(response.getAliasesList())
                 .properties(properties)
                 .build();
         return describeCollectionResp;

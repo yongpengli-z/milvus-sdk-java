@@ -53,6 +53,7 @@ public class UpsertReq {
     private String collectionName;
     private String partitionName;
     private boolean partialUpdate;
+    private List<FieldPartialUpdateOp> fieldOps;
 
     private UpsertReq(UpsertReqBuilder builder) {
         this.data = builder.data;
@@ -60,6 +61,7 @@ public class UpsertReq {
         this.collectionName = builder.collectionName;
         this.partitionName = builder.partitionName;
         this.partialUpdate = builder.partialUpdate;
+        this.fieldOps = builder.fieldOps;
     }
 
     public static UpsertReqBuilder builder() {
@@ -99,11 +101,28 @@ public class UpsertReq {
     }
 
     public boolean isPartialUpdate() {
+        if (partialUpdate || fieldOps == null) {
+            return partialUpdate;
+        }
+        for (FieldPartialUpdateOp fieldOp : fieldOps) {
+            if (fieldOp != null && fieldOp.getOpType() != null
+                    && fieldOp.getOpType() != FieldPartialUpdateOp.OpType.REPLACE) {
+                return true;
+            }
+        }
         return partialUpdate;
     }
 
     public void setPartialUpdate(boolean partialUpdate) {
         this.partialUpdate = partialUpdate;
+    }
+
+    public List<FieldPartialUpdateOp> getFieldOps() {
+        return fieldOps;
+    }
+
+    public void setFieldOps(List<FieldPartialUpdateOp> fieldOps) {
+        this.fieldOps = fieldOps;
     }
 
     @Override
@@ -113,7 +132,8 @@ public class UpsertReq {
                 ", databaseName='" + databaseName + '\'' +
                 ", collectionName='" + collectionName + '\'' +
                 ", partitionName='" + partitionName + '\'' +
-                ", partialUpdate=" + partialUpdate +
+                ", partialUpdate=" + isPartialUpdate() +
+                ", fieldOps=" + fieldOps +
                 '}';
     }
 
@@ -123,6 +143,7 @@ public class UpsertReq {
         private String collectionName;
         private String partitionName = "";
         private boolean partialUpdate = false; // default value
+        private List<FieldPartialUpdateOp> fieldOps = null;
 
         public UpsertReqBuilder data(List<JsonObject> data) {
             this.data = data;
@@ -149,8 +170,76 @@ public class UpsertReq {
             return this;
         }
 
+        public UpsertReqBuilder fieldOps(List<FieldPartialUpdateOp> fieldOps) {
+            this.fieldOps = fieldOps;
+            return this;
+        }
+
         public UpsertReq build() {
             return new UpsertReq(this);
+        }
+    }
+
+    public static class FieldPartialUpdateOp {
+        private String fieldName;
+        private OpType opType;
+
+        private FieldPartialUpdateOp(FieldPartialUpdateOpBuilder builder) {
+            this.fieldName = builder.fieldName;
+            this.opType = builder.opType;
+        }
+
+        public static FieldPartialUpdateOpBuilder builder() {
+            return new FieldPartialUpdateOpBuilder();
+        }
+
+        public String getFieldName() {
+            return fieldName;
+        }
+
+        public void setFieldName(String fieldName) {
+            this.fieldName = fieldName;
+        }
+
+        public OpType getOpType() {
+            return opType;
+        }
+
+        public void setOpType(OpType opType) {
+            this.opType = opType;
+        }
+
+        @Override
+        public String toString() {
+            return "FieldPartialUpdateOp{" +
+                    "fieldName='" + fieldName + '\'' +
+                    ", opType=" + opType +
+                    '}';
+        }
+
+        public enum OpType {
+            REPLACE,
+            ARRAY_APPEND,
+            ARRAY_REMOVE
+        }
+
+        public static class FieldPartialUpdateOpBuilder {
+            private String fieldName;
+            private OpType opType = OpType.REPLACE;
+
+            public FieldPartialUpdateOpBuilder fieldName(String fieldName) {
+                this.fieldName = fieldName;
+                return this;
+            }
+
+            public FieldPartialUpdateOpBuilder opType(OpType opType) {
+                this.opType = opType;
+                return this;
+            }
+
+            public FieldPartialUpdateOp build() {
+                return new FieldPartialUpdateOp(this);
+            }
         }
     }
 }

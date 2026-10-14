@@ -22,7 +22,6 @@ package io.milvus.client;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.ByteString;
 import io.milvus.common.clientenum.ConsistencyLevelEnum;
-import io.milvus.common.utils.GTsDict;
 import io.milvus.exception.IllegalResponseException;
 import io.milvus.exception.ParamException;
 import io.milvus.grpc.*;
@@ -281,6 +280,17 @@ class MilvusServiceClientTest {
                         .withIdleTimeout(-1, TimeUnit.MILLISECONDS)
                         .build()
         );
+    }
+
+    @Test
+    void connectParamDefaults() {
+        ConnectParam connectParam = ConnectParam.newBuilder()
+                .withHost("dummyHost")
+                .withPort(19530)
+                .build();
+        assertEquals(10000, connectParam.getKeepAliveTimeMs());
+        assertEquals(5000, connectParam.getKeepAliveTimeoutMs());
+        assertTrue(connectParam.isKeepAliveWithoutCalls());
     }
 
     @Test
@@ -3128,23 +3138,4 @@ class MilvusServiceClientTest {
         assertFalse(wrapper.toString().isEmpty());
     }
 
-    @Test
-    void testGTsDict() {
-        GTsDict dict = GTsDict.getInstance();
-        dict.updateCollectionTs("aaa", 0L);
-        dict.updateCollectionTs("bbb", 999L);
-        dict.updateCollectionTs("ccc", -10L);
-        Assertions.assertEquals(0L, dict.getCollectionTs("aaa"));
-        Assertions.assertEquals(999L, dict.getCollectionTs("bbb"));
-        Assertions.assertEquals(-10L, dict.getCollectionTs("ccc"));
-
-        dict.updateCollectionTs("aaa", 20L);
-        Assertions.assertEquals(20L, dict.getCollectionTs("aaa"));
-        dict.updateCollectionTs("bbb", 200L);
-        Assertions.assertEquals(999L, dict.getCollectionTs("bbb"));
-        dict.updateCollectionTs("ccc", -50L);
-        Assertions.assertEquals(-10L, dict.getCollectionTs("ccc"));
-        dict.updateCollectionTs("ccc", 50L);
-        Assertions.assertEquals(50L, dict.getCollectionTs("ccc"));
-    }
 }

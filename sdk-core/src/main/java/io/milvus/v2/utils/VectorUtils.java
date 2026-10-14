@@ -24,7 +24,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
 import com.google.protobuf.ByteString;
-import io.milvus.common.utils.GTsDict;
+import io.milvus.common.utils.cache.CollectionTsCache;
 import io.milvus.common.utils.JsonUtils;
 import io.milvus.exception.ParamException;
 import io.milvus.grpc.*;
@@ -49,6 +49,20 @@ import java.util.List;
 import java.util.Map;
 
 public class VectorUtils {
+    private String endpoint = "";
+    private String currentDbName;
+
+    public VectorUtils() {
+    }
+
+    public void setEndpoint(String endpoint) {
+        this.endpoint = endpoint == null ? "" : endpoint;
+    }
+
+    public void setCurrentDbName(String currentDbName) {
+        this.currentDbName = currentDbName;
+    }
+
 
     public QueryRequest ConvertToGrpcQueryRequest(QueryReq request) {
         if (request == null) {
@@ -127,19 +141,20 @@ public class VectorUtils {
 
     }
 
-    private static long getGuaranteeTimestamp(ConsistencyLevel consistencyLevel, String dbName, String collectionName) {
+    private long getGuaranteeTimestamp(ConsistencyLevel consistencyLevel, String dbName, String collectionName) {
+        String cacheDbName = StringUtils.isNotEmpty(dbName) ? dbName : currentDbName;
         if (consistencyLevel == null) {
-            String key = GTsDict.CombineCollectionName(dbName, collectionName);
-            Long ts = GTsDict.getInstance().getCollectionTs(key);
-            return (ts == null) ? 1L : ts;
+            long ts = StringUtils.isNotBlank(endpoint)
+                    ? CollectionTsCache.getInstance().get(endpoint, cacheDbName, collectionName) : 0L;
+            return ts == 0L ? 1L : ts;
         }
         switch (consistencyLevel) {
             case STRONG:
                 return 0L;
             case SESSION: {
-                String key = GTsDict.CombineCollectionName(dbName, collectionName);
-                Long ts = GTsDict.getInstance().getCollectionTs(key);
-                return (ts == null) ? 1L : ts;
+                long ts = StringUtils.isNotBlank(endpoint)
+                        ? CollectionTsCache.getInstance().get(endpoint, cacheDbName, collectionName) : 0L;
+                return ts == 0L ? 1L : ts;
             }
             case BOUNDED:
                 return 2L; // let server side to determine the bounded time
@@ -148,7 +163,7 @@ public class VectorUtils {
         }
     }
 
-    private static ByteString convertPlaceholder(List<Object> data, PlaceholderType placeType) {
+    private static ByteString convertPlaceholder(List<Object> data, PlaceholderType placeType, boolean elementLevel) {
         if (placeType == PlaceholderType.VarChar) {
             List<ByteString> byteStrings = new ArrayList<>();
             for (Object obj : data) {
@@ -156,7 +171,8 @@ public class VectorUtils {
             }
             PlaceholderValue.Builder pldBuilder = PlaceholderValue.newBuilder()
                     .setTag(Constant.VECTOR_TAG)
-                    .setType(placeType);
+                    .setType(placeType)
+                    .setElementLevel(elementLevel);
             byteStrings.forEach(pldBuilder::addValues);
 
             PlaceholderValue plv = pldBuilder.build();
@@ -166,14 +182,14 @@ public class VectorUtils {
             return placeholderGroup.toByteString();
         } else {
             try {
-                return ParamUtils.convertPlaceholder(data, placeType);
+                return ParamUtils.convertPlaceholder(data, placeType, elementLevel);
             } catch (ParamException e) {
                 throw new MilvusClientException(ErrorCode.INVALID_PARAMS, e.getMessage());
             }
         }
     }
 
-    private static void convertSearchTarget(SearchReq request, SearchRequest.Builder builder) {
+    private static void convertSearchTarget(SearchReq request, SearchRequest.Builder builder, boolean elementLevel) {
         // prepare target, the input could be:
         // 1. vectors or string list for doc-in-doc-out
         // 2. ids list for search by primary keys
@@ -200,7 +216,7 @@ public class VectorUtils {
                 data.add(vector.getData());
             }
 
-            ByteString byteStr = convertPlaceholder(data, plType);
+            ByteString byteStr = convertPlaceholder(data, plType, elementLevel);
             builder.setPlaceholderGroup(byteStr);
             builder.setNq(vectors.size());
         } else {
@@ -246,7 +262,9 @@ public class VectorUtils {
         }
 
         // target vectors or ids
-        convertSearchTarget(request, builder);
+        String filter = request.getFilter();
+        boolean elementLevel = filter != null && filter.contains("element_filter");
+        convertSearchTarget(request, builder, elementLevel);
 
         // search parameters
         // tries to fit the compatibility between v2.5.1 and older versions
@@ -343,7 +361,7 @@ public class VectorUtils {
         if (request.getSearchParams().containsKey("iterator")) {
             long guaranteeTimestamp = 0;
             if (request.getSearchParams().containsKey("guarantee_timestamp")) {
-                guaranteeTimestamp = (long) request.getSearchParams().get("guarantee_timestamp");
+                guaranteeTimestamp = ((Number) request.getSearchParams().get("guarantee_timestamp")).longValue();
             }
             builder.setGuaranteeTimestamp(guaranteeTimestamp);
         } else {
@@ -515,7 +533,7 @@ public class VectorUtils {
             data.add(vector.getData());
         }
 
-        ByteString byteStr = convertPlaceholder(data, plType);
+        ByteString byteStr = convertPlaceholder(data, plType, false);
         builder.setPlaceholderGroup(byteStr);
         builder.setNq(vectors.size());
 
@@ -666,7 +684,8 @@ public class VectorUtils {
     }
 
     private FunctionSchema convertFunctionSchema(CreateCollectionReq.Function function) {
-        Map<String, String> params = function.getParams();
+        Map<String, String> functionParams = function.getParams();
+        Map<String, String> params = functionParams == null ? new HashMap<>() : new HashMap<>(functionParams);
         // FunctionSchema type keyword is "reranker", old RRF/Weighted ranker type keyword is "strategy"
         // FunctionSchema parameters are flat, old RRF/Weighted parameters are wrapped by "params"
         if (function instanceof RRFRanker || function instanceof WeightedRanker) {

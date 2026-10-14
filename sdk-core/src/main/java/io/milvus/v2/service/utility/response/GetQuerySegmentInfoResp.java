@@ -34,7 +34,9 @@ public class GetQuerySegmentInfoResp {
         private String state;
         private String level;
         private List<Long> nodeIDs;
+        private Long storageVersion;
         private Boolean isSorted;
+        private String collectionName;
 
         private QuerySegmentInfo(QuerySegmentInfoBuilder builder) {
             this.segmentID = builder.segmentID;
@@ -47,7 +49,9 @@ public class GetQuerySegmentInfoResp {
             this.state = builder.state;
             this.level = builder.level;
             this.nodeIDs = builder.nodeIDs;
+            this.storageVersion = builder.storageVersion;
             this.isSorted = builder.isSorted;
+            this.collectionName = builder.collectionName;
         }
 
         public static QuerySegmentInfoBuilder builder() {
@@ -134,12 +138,28 @@ public class GetQuerySegmentInfoResp {
             this.nodeIDs = nodeIDs;
         }
 
+        public Long getStorageVersion() {
+            return storageVersion;
+        }
+
+        public void setStorageVersion(Long storageVersion) {
+            this.storageVersion = storageVersion;
+        }
+
         public Boolean getIsSorted() {
             return isSorted;
         }
 
         public void setIsSorted(Boolean isSorted) {
             this.isSorted = isSorted;
+        }
+
+        public String getCollectionName() {
+            return collectionName;
+        }
+
+        public void setCollectionName(String collectionName) {
+            this.collectionName = collectionName;
         }
 
         @Override
@@ -155,7 +175,9 @@ public class GetQuerySegmentInfoResp {
                     ", state='" + state + '\'' +
                     ", level='" + level + '\'' +
                     ", nodeIDs=" + nodeIDs +
+                    ", storageVersion=" + storageVersion +
                     ", isSorted=" + isSorted +
+                    ", collectionName='" + collectionName + '\'' +
                     '}';
         }
 
@@ -170,7 +192,9 @@ public class GetQuerySegmentInfoResp {
             private String state;
             private String level;
             private List<Long> nodeIDs = new ArrayList<>();
+            private Long storageVersion;
             private Boolean isSorted;
+            private String collectionName;
 
             public QuerySegmentInfoBuilder segmentID(Long segmentID) {
                 this.segmentID = segmentID;
@@ -222,8 +246,18 @@ public class GetQuerySegmentInfoResp {
                 return this;
             }
 
+            public QuerySegmentInfoBuilder storageVersion(Long storageVersion) {
+                this.storageVersion = storageVersion;
+                return this;
+            }
+
             public QuerySegmentInfoBuilder isSorted(Boolean isSorted) {
                 this.isSorted = isSorted;
+                return this;
+            }
+
+            public QuerySegmentInfoBuilder collectionName(String collectionName) {
+                this.collectionName = collectionName;
                 return this;
             }
 
